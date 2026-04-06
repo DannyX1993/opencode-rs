@@ -1,7 +1,7 @@
 //! Message and Part repositories.
 
 use opencode_core::{
-    dto::{MessageRow, PartRow},
+    dto::{MessageRow, MessageWithParts, PartRow},
     error::StorageError,
     id::{MessageId, SessionId},
 };
@@ -114,6 +114,24 @@ pub async fn list_parts(
         .into_iter()
         .map(part_from_row)
         .collect()
+}
+
+/// List all messages for a session with their parts, ordered by `(time_created, id)`.
+///
+/// This is the honest contract for history queries: each [`MessageWithParts`] bundles
+/// the message row together with its associated parts so callers never need a
+/// second round-trip to fetch parts separately.
+pub async fn list_with_parts(
+    pool: &SqlitePool,
+    session_id: SessionId,
+) -> Result<Vec<MessageWithParts>, StorageError> {
+    let msgs = list(pool, session_id).await?;
+    let mut result = Vec::with_capacity(msgs.len());
+    for msg in msgs {
+        let parts = list_parts(pool, msg.id).await?;
+        result.push(MessageWithParts { info: msg, parts });
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -236,5 +254,79 @@ mod tests {
         let (pool, _f, sid) = setup().await;
         let msgs = list(&pool, sid).await.unwrap();
         assert!(msgs.is_empty());
+    }
+
+    // ── Task 3.2 / 3.3: list_with_parts (RED → GREEN) ────────────────────────
+
+    #[tokio::test]
+    async fn list_with_parts_returns_message_with_its_parts() {
+        let (pool, _f, sid) = setup().await;
+        let mid = MessageId::new();
+
+        // insert message + 2 parts
+        append(
+            &pool,
+            &MessageRow {
+                id: mid,
+                session_id: sid,
+                time_created: 10,
+                time_updated: 10,
+                data: serde_json::json!({"role": "user"}),
+            },
+        )
+        .await
+        .unwrap();
+        for i in 0..2_i64 {
+            append_part(
+                &pool,
+                &PartRow {
+                    id: opencode_core::id::PartId::new(),
+                    message_id: mid,
+                    session_id: sid,
+                    time_created: 10 + i,
+                    time_updated: 10 + i,
+                    data: serde_json::json!({"type": "text", "idx": i}),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let history = list_with_parts(&pool, sid).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].info.id, mid);
+        assert_eq!(history[0].parts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_with_parts_empty_parts_when_no_parts() {
+        let (pool, _f, sid) = setup().await;
+        let mid = MessageId::new();
+
+        append(
+            &pool,
+            &MessageRow {
+                id: mid,
+                session_id: sid,
+                time_created: 5,
+                time_updated: 5,
+                data: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+
+        let history = list_with_parts(&pool, sid).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].info.id, mid);
+        // message exists but has zero parts
+        assert!(history[0].parts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_with_parts_empty_session_returns_empty() {
+        let (pool, _f, sid) = setup().await;
+        let history = list_with_parts(&pool, sid).await.unwrap();
+        assert!(history.is_empty());
     }
 }

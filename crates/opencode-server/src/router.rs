@@ -5,16 +5,39 @@ use serde_json::json;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
-use crate::state::AppState;
+use crate::{
+    routes::{project, session},
+    state::AppState,
+};
 use opencode_core::error::ServerError;
 
 /// Build the axum [`Router`] with all route groups registered.
 ///
-/// Phase 0 only includes the `/health` endpoint.
-/// Full routes are added in Phase 6.
+/// `/health` is the liveness probe (Phase 0, unchanged).
+/// `/api/v1/projects` CRUD routes are wired in Phase 5.
+/// `/api/v1/projects/:pid/sessions` and `/api/v1/sessions/:sid` routes are wired in Phase 6.
 pub fn build(state: AppState) -> Router {
+    let api = Router::new()
+        // Project routes (Phase 5)
+        .route("/projects", get(project::list))
+        .route("/projects/{id}", get(project::get).put(project::upsert))
+        // Session routes (Phase 6)
+        .route(
+            "/projects/{pid}/sessions",
+            get(session::list).post(session::create),
+        )
+        .route(
+            "/sessions/{sid}",
+            get(session::get).patch(session::update),
+        )
+        .route(
+            "/sessions/{sid}/messages",
+            get(session::list_messages).post(session::append_message),
+        );
+
     Router::new()
         .route("/health", get(health))
+        .nest("/api/v1", api)
         .with_state(state)
 }
 
@@ -51,7 +74,10 @@ mod tests {
     use opencode_bus::BroadcastBus;
     use opencode_core::config::Config;
     use opencode_core::{
-        dto::{AccountRow, MessageRow, PartRow, PermissionRow, ProjectRow, SessionRow, TodoRow},
+        dto::{
+            AccountRow, MessageRow, MessageWithParts, PartRow, PermissionRow, ProjectRow,
+            SessionRow, TodoRow,
+        },
         error::{SessionError, StorageError},
         id::{ProjectId, SessionId},
     };
@@ -92,6 +118,12 @@ mod tests {
             Ok(())
         }
         async fn list_history(&self, _: SessionId) -> Result<Vec<MessageRow>, StorageError> {
+            Ok(vec![])
+        }
+        async fn list_history_with_parts(
+            &self,
+            _: SessionId,
+        ) -> Result<Vec<MessageWithParts>, StorageError> {
             Ok(vec![])
         }
         async fn save_todos(&self, _: SessionId, _: Vec<TodoRow>) -> Result<(), StorageError> {
@@ -263,6 +295,7 @@ mod tests {
         };
         s.append_message(msg, vec![part]).await.unwrap();
         assert!(s.list_history(sid).await.unwrap().is_empty());
+        assert!(s.list_history_with_parts(sid).await.unwrap().is_empty());
         let todo = TodoRow {
             session_id: sid,
             content: "x".into(),

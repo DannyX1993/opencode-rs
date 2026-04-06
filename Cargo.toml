@@ -1,127 +1,139 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/opencode-core",
-    "crates/opencode-bus",
-    "crates/opencode-storage",
-    "crates/opencode-provider",
-    "crates/opencode-tool",
-    "crates/opencode-session",
-    "crates/opencode-server",
-    "crates/opencode-cli",
-    "crates/opencode-lsp",
-    "crates/opencode-mcp",
-    "crates/opencode-plugin",
-    "crates/opencode-tui",
-    "opencode",
+  "crates/opencode-bus",
+  "crates/opencode-cli",
+  "crates/opencode-core",
+  "crates/opencode-lsp",
+  "crates/opencode-mcp",
+  "crates/opencode-plugin",
+  "crates/opencode-provider",
+  "crates/opencode-server",
+  "crates/opencode-session",
+  "crates/opencode-storage",
+  "crates/opencode-tool",
+  "crates/opencode-tui",
+  "opencode",
 ]
 
 [workspace.package]
-version      = "0.1.0"
-edition      = "2024"
-authors      = ["Anomaly Innovations"]
-license      = "MIT"
-repository   = "https://github.com/opencode-ai/opencode"
+version = "0.2.0"
+authors = ["DannyX"]
+edition = "2024"
 rust-version = "1.85"
+repository = "https://github.com/opencode-ai/opencode"
+license = "MIT"
 
 # ─── Workspace-level dependencies ────────────────────────────────────────────
 [workspace.dependencies]
+opencode-bus = { path = "crates/opencode-bus" }
+opencode-cli = { path = "crates/opencode-cli" }
 # internal crates
-opencode-core    = { path = "crates/opencode-core" }
-opencode-bus     = { path = "crates/opencode-bus" }
-opencode-storage = { path = "crates/opencode-storage" }
+opencode-core = { path = "crates/opencode-core" }
+opencode-lsp = { path = "crates/opencode-lsp" }
+opencode-mcp = { path = "crates/opencode-mcp" }
+opencode-plugin = { path = "crates/opencode-plugin" }
 opencode-provider = { path = "crates/opencode-provider" }
-opencode-tool    = { path = "crates/opencode-tool" }
+opencode-server = { path = "crates/opencode-server" }
 opencode-session = { path = "crates/opencode-session" }
-opencode-server  = { path = "crates/opencode-server" }
-opencode-cli     = { path = "crates/opencode-cli" }
-opencode-lsp     = { path = "crates/opencode-lsp" }
-opencode-mcp     = { path = "crates/opencode-mcp" }
-opencode-plugin  = { path = "crates/opencode-plugin" }
-opencode-tui     = { path = "crates/opencode-tui" }
+opencode-storage = { path = "crates/opencode-storage" }
+opencode-tool = { path = "crates/opencode-tool" }
+opencode-tui = { path = "crates/opencode-tui" }
 
+async-trait = "0.1"
+futures = "0.3"
 # async runtime
-tokio            = { version = "1", features = ["full"] }
-futures          = "0.3"
-async-trait      = "0.1"
-tokio-util       = { version = "0.7", features = ["full"] }
-tokio-stream     = "0.1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["full"] }
 
 # serialisation
-serde            = { version = "1", features = ["derive"] }
-serde_json       = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
+anyhow = "1"
 # error handling
-thiserror        = "2"
-anyhow           = "1"
+thiserror = "2"
 
 # tracing / observability
-tracing                    = "0.1"
-tracing-subscriber         = { version = "0.3", features = ["env-filter", "json"] }
-tracing-test               = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-test = "0.2"
 
+time = { version = "0.3", features = ["formatting", "macros", "serde"] }
 # ids & time
-uuid             = { version = "1", features = ["v4", "serde"] }
-time             = { version = "0.3", features = ["serde", "formatting", "macros"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 
 # config / json
-jsonc-parser     = { version = "0.32", features = ["serde"] }
+jsonc-parser = { version = "0.32", features = ["serde"] }
 
+axum = { version = "0.8", features = ["macros", "ws"] }
 # HTTP
-reqwest          = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
-axum             = { version = "0.8", features = ["ws", "macros"] }
-tower            = { version = "0.5", features = ["full"] }
-tower-http       = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+  "stream"
+] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "cors", "trace"] }
 
 # CLI
-clap             = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # database
-sqlx             = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "migrate", "json", "time", "uuid", "macros"], default-features = false }
+sqlx = { version = "0.8", default-features = false, features = [
+  "json",
+  "macros",
+  "migrate",
+  "runtime-tokio-rustls",
+  "sqlite",
+  "time",
+  "uuid"
+] }
 
 # SSE / streams
 eventsource-stream = "0.2"
 
+insta = { version = "1", features = ["json"] }
+tempfile = "3"
 # testing
-tokio-test       = "0.4"
-insta            = { version = "1", features = ["json"] }
-tempfile         = "3"
+tokio-test = "0.4"
 
-# ─── Release profiles ────────────────────────────────────────────────────────
-[profile.release]
-opt-level       = 3
-lto             = "fat"
-codegen-units   = 1
-panic           = "abort"
-strip           = true
-
-[profile.release-debug]
-inherits        = "release"
-strip           = false
-debug           = true
-
-[profile.dev]
-opt-level       = 0
-debug           = true
-
-# Speed up proc-macro and build-script compile times in dev
-[profile.dev.package."*"]
-opt-level       = 3
-
-[profile.bench]
-inherits        = "release"
-debug           = true
-strip           = false
+[workspace.lints.clippy]
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
 
 # ─── Workspace lint configuration ────────────────────────────────────────────
 [workspace.lints.rust]
-unsafe_code        = "warn"
-missing_docs       = "warn"
-unused_must_use    = "deny"
+missing_docs = "warn"
+unsafe_code = "warn"
+unused_must_use = "deny"
 
-[workspace.lints.clippy]
-correctness        = { level = "deny",  priority = -1 }
-suspicious         = { level = "warn",  priority = -1 }
-style              = { level = "warn",  priority = -1 }
-complexity         = { level = "warn",  priority = -1 }
-perf               = { level = "warn",  priority = -1 }
+[profile.bench]
+inherits = "release"
+debug = true
+strip = false
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+# Speed up proc-macro and build-script compile times in dev
+[profile.dev.package."*"]
+opt-level = 3
+
+# ─── Release profiles ────────────────────────────────────────────────────────
+[profile.release]
+opt-level = 3
+strip = true
+lto = "fat"
+panic = "abort"
+codegen-units = 1
+
+[profile.release-debug]
+inherits = "release"
+debug = true
+strip = false

@@ -1,6 +1,7 @@
 //! Server-layer error types and `IntoResponse` mapping.
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
+use opencode_core::error::StorageError;
 use serde_json::json;
 
 /// HTTP error response wrapper.
@@ -42,10 +43,29 @@ impl IntoResponse for HttpError {
     }
 }
 
+/// Map storage-layer errors to HTTP errors.
+///
+/// - [`StorageError::NotFound`] → 404 with entity/id in the message
+/// - [`StorageError::Db`] / [`StorageError::Serde`] → 500
+impl From<StorageError> for HttpError {
+    fn from(err: StorageError) -> Self {
+        match err {
+            StorageError::NotFound { entity, id } => {
+                Self::not_found(format!("not found: {entity} {id}"))
+            }
+            StorageError::Db(msg) => Self::internal(msg),
+            StorageError::Serde(msg) => Self::internal(msg),
+            // `#[non_exhaustive]` guard — any future variants become 500
+            _ => Self::internal(err.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+    use opencode_core::error::StorageError;
 
     #[test]
     fn not_found_status() {
@@ -72,5 +92,51 @@ mod tests {
     fn debug_impl() {
         let e = HttpError::not_found("x");
         assert!(format!("{e:?}").contains("HttpError"));
+    }
+
+    // ── Task 4.1: StorageError::NotFound → 404 ───────────────────────────────
+
+    #[test]
+    fn storage_not_found_maps_to_404() {
+        let storage_err = StorageError::NotFound {
+            entity: "project",
+            id: "abc-123".into(),
+        };
+        let http_err = HttpError::from(storage_err);
+        assert_eq!(http_err.status, StatusCode::NOT_FOUND);
+        assert!(http_err.msg.contains("project"));
+    }
+
+    // ── Task 4.2: StorageError::Db → 500 ─────────────────────────────────────
+
+    #[test]
+    fn storage_db_error_maps_to_500() {
+        let storage_err = StorageError::Db("connection refused".into());
+        let http_err = HttpError::from(storage_err);
+        assert_eq!(http_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(http_err.msg.contains("connection refused"));
+    }
+
+    // ── Task 4.3: StorageError::Serde → 500 ──────────────────────────────────
+
+    #[test]
+    fn storage_serde_error_maps_to_500() {
+        let storage_err = StorageError::Serde("invalid json field".into());
+        let http_err = HttpError::from(storage_err);
+        assert_eq!(http_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(http_err.msg.contains("invalid json field"));
+    }
+
+    // ── Triangulation: verify msg content for NotFound ───────────────────────
+
+    #[test]
+    fn storage_not_found_msg_includes_id() {
+        let storage_err = StorageError::NotFound {
+            entity: "session",
+            id: "sess-xyz-999".into(),
+        };
+        let http_err = HttpError::from(storage_err);
+        assert_eq!(http_err.status, StatusCode::NOT_FOUND);
+        assert!(http_err.msg.contains("sess-xyz-999"));
     }
 }

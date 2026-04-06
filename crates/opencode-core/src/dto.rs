@@ -202,6 +202,20 @@ pub struct PermissionRow {
     pub data: serde_json::Value,
 }
 
+// ─── MessageWithParts ─────────────────────────────────────────────────────────
+
+/// Composite DTO: a message row paired with all of its parts.
+///
+/// This is the honest return shape for history queries — callers always need
+/// the parts alongside the message to reconstruct the full conversation turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageWithParts {
+    /// The message header row.
+    pub info: MessageRow,
+    /// All parts belonging to this message, in `id` order.
+    pub parts: Vec<PartRow>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +255,69 @@ mod tests {
         let json = serde_json::to_value(&row).unwrap();
         let back: TodoRow = serde_json::from_value(json).unwrap();
         assert_eq!(row.content, back.content);
+    }
+
+    // ── Task 3.1: MessageWithParts composite DTO ─────────────────────────────
+
+    #[test]
+    fn message_with_parts_holds_info_and_parts() {
+        use crate::id::{MessageId, PartId};
+        let sid = SessionId::new();
+        let mid = MessageId::new();
+        let pid = PartId::new();
+
+        let msg = MessageRow {
+            id: mid,
+            session_id: sid,
+            time_created: 1_000,
+            time_updated: 1_001,
+            data: serde_json::json!({"role": "user"}),
+        };
+        let part = PartRow {
+            id: pid,
+            message_id: mid,
+            session_id: sid,
+            time_created: 1_000,
+            time_updated: 1_001,
+            data: serde_json::json!({"type": "text", "text": "hi"}),
+        };
+        let mwp = MessageWithParts {
+            info: msg.clone(),
+            parts: vec![part.clone()],
+        };
+
+        assert_eq!(mwp.info.id, mid);
+        assert_eq!(mwp.parts.len(), 1);
+        assert_eq!(mwp.parts[0].id, pid);
+        assert_eq!(mwp.parts[0].data["text"], "hi");
+    }
+
+    #[test]
+    fn message_with_parts_round_trips_json() {
+        use crate::id::{MessageId, PartId};
+        let sid = SessionId::new();
+        let mid = MessageId::new();
+
+        let mwp = MessageWithParts {
+            info: MessageRow {
+                id: mid,
+                session_id: sid,
+                time_created: 2_000,
+                time_updated: 2_001,
+                data: serde_json::json!({"role": "assistant"}),
+            },
+            parts: vec![PartRow {
+                id: PartId::new(),
+                message_id: mid,
+                session_id: sid,
+                time_created: 2_000,
+                time_updated: 2_001,
+                data: serde_json::json!({"type": "text", "text": "pong"}),
+            }],
+        };
+        let json = serde_json::to_value(&mwp).unwrap();
+        let back: MessageWithParts = serde_json::from_value(json).unwrap();
+        assert_eq!(back.info.id, mid);
+        assert_eq!(back.parts[0].data["text"], "pong");
     }
 }
