@@ -1,0 +1,32 @@
+[package]
+name        = "opencode-server"
+description = "Axum HTTP server — REST + SSE + WebSocket for opencode"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+
+[dependencies]
+opencode-core    = { workspace = true }
+opencode-bus     = { workspace = true }
+opencode-storage = { workspace = true }
+opencode-session = { workspace = true }
+axum             = { workspace = true }
+tower            = { workspace = true }
+tower-http       = { workspace = true }
+tokio            = { workspace = true }
+tokio-stream     = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+tracing          = { workspace = true }
+thiserror        = { workspace = true }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+tower       = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

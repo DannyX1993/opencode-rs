@@ -1,0 +1,28 @@
+[build]
+# Use lld on Linux for faster linking in dev
+# Requires: `rustup component add llvm-tools` or `apt install lld`
+# Uncomment if lld is available in CI:
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.x86_64-unknown-linux-gnu]
+# Split debug info for faster incremental builds
+rustflags = ["-C", "split-debuginfo=unpacked"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "split-debuginfo=unpacked"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "split-debuginfo=unpacked"]
+
+# ─── Coverage aliases ─────────────────────────────────────────────────────────
+# Requires: cargo install cargo-llvm-cov
+# Usage:
+#   cargo coverage            → generate LCOV report
+#   cargo coverage-summary    → print summary, fail if < 85%
+#   cargo coverage-html       → open HTML report in browser
+[alias]
+coverage         = "llvm-cov --workspace --lcov --output-path target/coverage/lcov.info"
+coverage-summary = "llvm-cov --workspace --summary-only --fail-under-lines 85 --fail-under-regions 85"
+coverage-html    = "llvm-cov --workspace --html --output-dir target/coverage/html"
+

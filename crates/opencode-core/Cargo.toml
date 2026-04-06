@@ -1,0 +1,32 @@
+[package]
+name        = "opencode-core"
+description = "Shared types, error model, config, and tracing bootstrap for opencode"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid        = { workspace = true }
+time        = { workspace = true }
+jsonc-parser = { workspace = true }
+tokio       = { workspace = true }
+futures     = { workspace = true }
+tokio-util  = { workspace = true }
+
+[dev-dependencies]
+tokio        = { workspace = true }
+tracing-test = { workspace = true }
+insta        = { workspace = true }
+tempfile     = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+[package]
+name        = "opencode-session"
+description = "Session engine and agent loop for opencode"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+
+[dependencies]
+opencode-core    = { workspace = true }
+opencode-bus     = { workspace = true }
+opencode-storage = { workspace = true }
+tokio            = { workspace = true }
+futures          = { workspace = true }
+async-trait      = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+tracing          = { workspace = true }
+thiserror        = { workspace = true }
+tokio-util       = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true }
+
+[lints]
+workspace = true

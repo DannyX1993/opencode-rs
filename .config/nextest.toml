@@ -1,0 +1,9 @@
+[nextest]
+version       = 3
+profile.ci.retries = 2
+
+[profile.default]
+test-threads  = "num-cpus"
+
+[profile.ci]
+test-threads  = 4

@@ -1,0 +1,32 @@
+[package]
+name        = "opencode"
+description = "The opencode AI coding agent — Rust binary"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+
+[[bin]]
+name = "opencode"
+path = "src/main.rs"
+
+[lib]
+name = "opencode"
+path = "src/lib.rs"
+
+[dependencies]
+opencode-core = { workspace = true }
+opencode-cli  = { workspace = true }
+tokio         = { workspace = true }
+anyhow        = { workspace = true }
+tracing       = { workspace = true }
+serde_json    = { workspace = true }
+
+[dev-dependencies]
+clap          = { workspace = true }
+tempfile      = { workspace = true }
+
+[lints]
+workspace = true
