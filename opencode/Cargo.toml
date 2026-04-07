@@ -17,16 +17,22 @@ name = "opencode"
 path = "src/lib.rs"
 
 [dependencies]
-opencode-core = { workspace = true }
-opencode-cli  = { workspace = true }
-tokio         = { workspace = true }
-anyhow        = { workspace = true }
-tracing       = { workspace = true }
-serde_json    = { workspace = true }
+opencode-core     = { workspace = true }
+opencode-cli      = { workspace = true }
+opencode-bus      = { workspace = true }
+opencode-server   = { workspace = true }
+opencode-provider = { workspace = true }
+opencode-session  = { workspace = true }
+opencode-storage  = { workspace = true }
+tokio             = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }
+serde_json        = { workspace = true }
 
 [dev-dependencies]
-clap          = { workspace = true }
-tempfile      = { workspace = true }
+clap              = { workspace = true }
+tempfile          = { workspace = true }
+reqwest           = { workspace = true }
 
 [lints]
 workspace = true

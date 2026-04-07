@@ -2,6 +2,7 @@
 
 use opencode_bus::BroadcastBus;
 use opencode_core::config::Config;
+use opencode_provider::ModelRegistry;
 use opencode_session::engine::Session;
 use opencode_storage::Storage;
 use std::sync::Arc;
@@ -17,4 +18,9 @@ pub struct AppState {
     pub storage: Arc<dyn Storage>,
     /// Session engine.
     pub session: Arc<dyn Session>,
+    /// LLM provider registry (may be empty when harness is disabled).
+    pub registry: Arc<ModelRegistry>,
+    /// When `true`, the manual provider harness route is active.
+    /// Set by reading `OPENCODE_MANUAL_HARNESS=1` at startup.
+    pub harness: bool,
 }

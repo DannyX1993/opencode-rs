@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 authors = ["DannyX"]
 edition = "2024"
 rust-version = "1.85"
@@ -94,10 +94,15 @@ sqlx = { version = "0.8", default-features = false, features = [
 # SSE / streams
 eventsource-stream = "0.2"
 
+# provider SDK crates
+async-openai = { version = "0.34", default-features = false, features = ["rustls", "responses", "chat-completion"] }
+async-anthropic = "0.6"
+
 insta = { version = "1", features = ["json"] }
 tempfile = "3"
 # testing
 tokio-test = "0.4"
+wiremock = "0.6"
 
 [workspace.lints.clippy]
 complexity = { level = "warn", priority = -1 }

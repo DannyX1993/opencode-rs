@@ -185,6 +185,8 @@ mod tests {
             bus: Arc::new(BroadcastBus::new(64)),
             storage: Arc::new(stub),
             session: Arc::new(StubSession),
+            registry: Arc::new(opencode_provider::ModelRegistry::new()),
+            harness: false,
         };
         crate::router::build(state)
     }

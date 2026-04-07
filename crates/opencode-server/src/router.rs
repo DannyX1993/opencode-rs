@@ -1,12 +1,12 @@
 //! Axum router factory.
 
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, routing::get, routing::post};
 use serde_json::json;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 use crate::{
-    routes::{project, session},
+    routes::{project, provider, session},
     state::AppState,
 };
 use opencode_core::error::ServerError;
@@ -16,6 +16,7 @@ use opencode_core::error::ServerError;
 /// `/health` is the liveness probe (Phase 0, unchanged).
 /// `/api/v1/projects` CRUD routes are wired in Phase 5.
 /// `/api/v1/projects/:pid/sessions` and `/api/v1/sessions/:sid` routes are wired in Phase 6.
+/// `/api/v1/provider/stream` is the manual harness (Phase 2, gated by env var).
 pub fn build(state: AppState) -> Router {
     let api = Router::new()
         // Project routes (Phase 5)
@@ -33,7 +34,9 @@ pub fn build(state: AppState) -> Router {
         .route(
             "/sessions/{sid}/messages",
             get(session::list_messages).post(session::append_message),
-        );
+        )
+        // Manual provider harness (Phase 2 — env-gated)
+        .route("/provider/stream", post(provider::stream));
 
     Router::new()
         .route("/health", get(health))
@@ -81,6 +84,7 @@ mod tests {
         error::{SessionError, StorageError},
         id::{ProjectId, SessionId},
     };
+    use opencode_provider::ModelRegistry;
     use opencode_session::engine::Session;
     use opencode_session::types::{SessionHandle, SessionPrompt};
     use opencode_storage::Storage;
@@ -175,6 +179,8 @@ mod tests {
             bus: Arc::new(BroadcastBus::new(64)),
             storage: Arc::new(StubStorage),
             session: Arc::new(StubSession),
+            registry: Arc::new(ModelRegistry::new()),
+            harness: false,
         }
     }
 
@@ -357,5 +363,241 @@ mod tests {
         };
         assert!(s.prompt(prompt).await.is_err());
         assert!(s.cancel(SessionId::new()).await.is_err());
+    }
+
+    // ── Phase 7: provider harness route tests ────────────────────────────────
+
+    // ── Provider stub for failure path testing ────────────────────────────────
+
+    struct FailProvider;
+
+    #[async_trait]
+    impl opencode_provider::LanguageModel for FailProvider {
+        fn provider(&self) -> &'static str {
+            "fail"
+        }
+        async fn models(
+            &self,
+        ) -> Result<Vec<opencode_provider::ModelInfo>, opencode_provider::ProviderError> {
+            Ok(vec![])
+        }
+        async fn stream(
+            &self,
+            _: opencode_provider::ModelRequest,
+        ) -> Result<
+            opencode_core::context::BoxStream<
+                Result<opencode_provider::ModelEvent, opencode_provider::ProviderError>,
+            >,
+            opencode_provider::ProviderError,
+        > {
+            Err(opencode_provider::ProviderError::Auth {
+                provider: "fail".into(),
+                msg: "injected auth failure".into(),
+            })
+        }
+    }
+
+    // RED 7.1 — harness disabled → 403
+    #[tokio::test]
+    async fn provider_stream_disabled_returns_403() {
+        let app = build(state()); // harness: false
+        let body = serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-4o",
+            "prompt": "hello"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/provider/stream")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // RED 7.2 — harness enabled, unknown provider → 404
+    #[tokio::test]
+    async fn provider_stream_unknown_provider_returns_404() {
+        let mut s = state();
+        s.harness = true;
+        let app = build(s);
+        let body = serde_json::json!({
+            "provider": "does-not-exist",
+            "model": "model-x",
+            "prompt": "hello"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/provider/stream")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // RED 7.3 — harness enabled, registered provider, wiremock → 200 SSE
+    #[tokio::test]
+    async fn provider_stream_returns_sse_events() {
+        use opencode_provider::{EnvAuthResolver, OpenAiProvider};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path as wm_path},
+        };
+
+        let srv = MockServer::start().await;
+        let fixture = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(fixture),
+            )
+            .mount(&srv)
+            .await;
+
+        let auth = std::sync::Arc::new(EnvAuthResolver::new(
+            "openai",
+            "OPENAI_KEY_HARNESS_TEST_NONEXISTENT",
+            Some("key".into()),
+        ));
+        let reg = ModelRegistry::new();
+        reg.register(
+            "openai",
+            std::sync::Arc::new(OpenAiProvider::with_base_url(auth, srv.uri())),
+        )
+        .await;
+
+        let mut s = state();
+        s.harness = true;
+        s.registry = std::sync::Arc::new(reg);
+
+        let app = build(s);
+        let body = serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-4o",
+            "prompt": "hello"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/provider/stream")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/event-stream"));
+    }
+
+    // RED 7.4 — harness enabled, provider.stream() fails → 502 BAD_GATEWAY
+    #[tokio::test]
+    async fn provider_stream_provider_error_returns_502() {
+        let reg = ModelRegistry::new();
+        reg.register("fail", std::sync::Arc::new(FailProvider))
+            .await;
+
+        let mut s = state();
+        s.harness = true;
+        s.registry = std::sync::Arc::new(reg);
+
+        let app = build(s);
+        let body = serde_json::json!({
+            "provider": "fail",
+            "model": "model-x",
+            "prompt": "hello"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/provider/stream")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            val["error"].as_str().is_some(),
+            "response must have error field"
+        );
+    }
+
+    // RED 7.5 — SSE body contains serialised ModelEvent text
+    #[tokio::test]
+    async fn provider_stream_sse_body_contains_event_data() {
+        use opencode_provider::{EnvAuthResolver, OpenAiProvider};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path as wm_path},
+        };
+
+        let srv = MockServer::start().await;
+        let fixture = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(fixture),
+            )
+            .mount(&srv)
+            .await;
+
+        let auth = std::sync::Arc::new(EnvAuthResolver::new(
+            "openai",
+            "OPENAI_KEY_BODY_TEST_NONEXISTENT",
+            Some("key".into()),
+        ));
+        let reg = ModelRegistry::new();
+        reg.register(
+            "openai",
+            std::sync::Arc::new(OpenAiProvider::with_base_url(auth, srv.uri())),
+        )
+        .await;
+
+        let mut s = state();
+        s.harness = true;
+        s.registry = std::sync::Arc::new(reg);
+
+        let app = build(s);
+        let body = serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-4o",
+            "prompt": "hello"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/provider/stream")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Read the full SSE body and verify it contains a TextDelta event.
+        let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let body_str = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            body_str.contains("text_delta"),
+            "SSE body must contain text_delta event, got: {body_str}"
+        );
+        assert!(
+            body_str.contains("hi"),
+            "SSE body must contain the prompt reply text, got: {body_str}"
+        );
     }
 }

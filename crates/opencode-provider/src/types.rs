@@ -26,6 +26,8 @@ pub struct ModelInfo {
 /// A single LLM request payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequest {
+    /// Target model id (e.g. `"claude-3-haiku-20240307"`).
+    pub model: String,
     /// System prompt.
     pub system: Vec<ModelMessage>,
     /// Conversation history + current user turn.
@@ -157,4 +159,42 @@ pub trait LanguageModel: Send + Sync {
         &self,
         req: ModelRequest,
     ) -> Result<BoxStream<Result<ModelEvent, ProviderError>>, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(model: &str) -> ModelRequest {
+        ModelRequest {
+            model: model.into(),
+            system: vec![],
+            messages: vec![],
+            tools: Default::default(),
+            max_tokens: None,
+            temperature: None,
+        }
+    }
+
+    #[test]
+    fn model_request_has_model_field() {
+        let r = req("claude-3-haiku-20240307");
+        assert_eq!(r.model, "claude-3-haiku-20240307");
+    }
+
+    #[test]
+    fn model_request_roundtrips_json() {
+        let r = req("gpt-4o");
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"model\":\"gpt-4o\""));
+        let decoded: ModelRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.model, "gpt-4o");
+    }
+
+    #[test]
+    fn model_request_different_models_distinct() {
+        let a = req("claude-3-haiku-20240307");
+        let b = req("gpt-4o-mini");
+        assert_ne!(a.model, b.model);
+    }
 }
