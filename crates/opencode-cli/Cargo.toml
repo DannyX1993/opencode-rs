@@ -14,11 +14,13 @@ opencode-bus     = { workspace = true }
 opencode-storage = { workspace = true }
 opencode-session = { workspace = true }
 opencode-server  = { workspace = true }
+opencode-tool    = { workspace = true }
 clap             = { workspace = true }
 tokio            = { workspace = true }
 tracing          = { workspace = true }
 anyhow           = { workspace = true }
 serde            = { workspace = true }
+serde_json       = { workspace = true }
 
 [dev-dependencies]
 tokio    = { workspace = true }

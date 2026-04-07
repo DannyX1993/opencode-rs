@@ -1,5 +1,6 @@
 //! Thread-safe tool registry.
 
+use crate::common::Ctx;
 use crate::types::{Tool, ToolCall, ToolError, ToolResult};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
@@ -16,6 +17,22 @@ impl ToolRegistry {
         Self {
             tools: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Create a registry pre-populated with all built-in tools for the given context.
+    #[must_use]
+    pub fn with_builtins(ctx: Ctx) -> Self {
+        let reg = Self::new();
+        let tools = crate::tools::all(ctx);
+        let mut map = reg
+            .tools
+            .try_write()
+            .expect("no contention during construction");
+        for tool in tools {
+            map.insert(tool.name().to_string(), tool);
+        }
+        drop(map);
+        reg
     }
 
     /// Register a tool.
@@ -69,11 +86,11 @@ mod tests {
             ToolPolicy::default()
         }
         async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
-            Ok(ToolResult {
-                call_id: call.id,
-                ok: true,
-                content: call.args.to_string(),
-            })
+            Ok(ToolResult::ok(
+                call.id,
+                "echo".into(),
+                call.args.to_string(),
+            ))
         }
     }
 
@@ -87,8 +104,8 @@ mod tests {
             args: serde_json::json!({"x": 1}),
         };
         let res = reg.invoke(call).await.unwrap();
-        assert!(res.ok);
-        assert!(res.content.contains("1"));
+        assert!(!res.is_err);
+        assert!(res.output.contains("1"));
     }
 
     #[tokio::test]
@@ -107,5 +124,21 @@ mod tests {
     async fn get_returns_none_for_missing() {
         let reg = ToolRegistry::new();
         assert!(reg.get("nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn with_builtins_registers_all_six() {
+        use std::path::PathBuf;
+        let ctx = Ctx::new(
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp/out"),
+            "/bin/sh".into(),
+            5_000,
+        );
+        let reg = ToolRegistry::with_builtins(ctx);
+        for name in &["read", "list", "glob", "grep", "write", "bash"] {
+            assert!(reg.get(name).await.is_some(), "missing tool: {name}");
+        }
     }
 }

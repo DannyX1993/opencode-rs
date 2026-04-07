@@ -55,6 +55,24 @@ pub enum Command {
         #[arg(long)]
         show: bool,
     },
+
+    /// Invoke a built-in tool from the command line.
+    ///
+    /// Example:
+    ///   opencode tool read --args-json '{"filePath":"Cargo.toml","limit":5}'
+    ///   opencode tool bash --args-json '{"command":"pwd","description":"print cwd"}'
+    Tool {
+        /// Tool name (e.g. read, bash, list, glob, grep, write).
+        name: String,
+
+        /// JSON-encoded arguments for the tool (default: `{}`).
+        #[arg(long, value_name = "JSON")]
+        args_json: Option<String>,
+
+        /// Output format: text | json.
+        #[arg(long, default_value = "text")]
+        output: String,
+    },
 }
 
 impl Cli {
@@ -129,5 +147,60 @@ mod tests {
     fn log_level_override() {
         let cli = Cli::try_parse_from(["opencode", "--log-level", "debug"]).unwrap();
         assert_eq!(cli.log_level, "debug");
+    }
+
+    // ── B.1 RED: tool subcommand parsing tests ────────────────────────────────
+
+    #[test]
+    fn tool_subcommand_parses_name() {
+        let cli = Cli::try_parse_from(["opencode", "tool", "read"]).unwrap();
+        if let Some(Command::Tool { name, .. }) = cli.command {
+            assert_eq!(name, "read");
+        } else {
+            panic!("expected Tool subcommand");
+        }
+    }
+
+    #[test]
+    fn tool_subcommand_default_output_text() {
+        let cli = Cli::try_parse_from(["opencode", "tool", "bash"]).unwrap();
+        if let Some(Command::Tool { output, .. }) = cli.command {
+            assert_eq!(output, "text");
+        } else {
+            panic!("expected Tool subcommand");
+        }
+    }
+
+    #[test]
+    fn tool_subcommand_json_output_flag() {
+        let cli = Cli::try_parse_from(["opencode", "tool", "read", "--output", "json"]).unwrap();
+        if let Some(Command::Tool { output, .. }) = cli.command {
+            assert_eq!(output, "json");
+        } else {
+            panic!("expected Tool subcommand");
+        }
+    }
+
+    #[test]
+    fn tool_subcommand_args_json_flag() {
+        let cli = Cli::try_parse_from([
+            "opencode",
+            "tool",
+            "read",
+            "--args-json",
+            r#"{"filePath":"Cargo.toml"}"#,
+        ])
+        .unwrap();
+        if let Some(Command::Tool { args_json, .. }) = cli.command {
+            assert_eq!(args_json.unwrap(), r#"{"filePath":"Cargo.toml"}"#);
+        } else {
+            panic!("expected Tool subcommand");
+        }
+    }
+
+    #[test]
+    fn tool_subcommand_missing_name_errors() {
+        let result = Cli::try_parse_from(["opencode", "tool"]);
+        assert!(result.is_err(), "tool subcommand requires a name argument");
     }
 }

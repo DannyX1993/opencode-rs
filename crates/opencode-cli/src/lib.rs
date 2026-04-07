@@ -5,5 +5,6 @@
 
 #![warn(missing_docs)]
 
-pub mod cli;
 pub mod bootstrap;
+pub mod cli;
+pub mod tool_cmd;

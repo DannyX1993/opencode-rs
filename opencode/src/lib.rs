@@ -37,6 +37,17 @@ pub async fn dispatch(cli: Cli, cwd: &Path) -> Result<()> {
         Command::Config { show: false } => {
             tracing::info!("config edit — not yet implemented");
         }
+        Command::Tool {
+            name,
+            args_json,
+            output,
+        } => match opencode_cli::tool_cmd::run(&name, args_json.as_deref(), &output, cwd).await {
+            Ok(out) => print!("{out}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        },
     }
     Ok(())
 }
@@ -225,5 +236,30 @@ mod tests {
         unsafe {
             std::env::remove_var("OPENCODE_MANUAL_HARNESS");
         }
+    }
+
+    // ── B.5 REFACTOR: Tool dispatch integration ───────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_tool_bash_echo() {
+        let cli = Cli::try_parse_from([
+            "opencode",
+            "tool",
+            "bash",
+            "--args-json",
+            r#"{"command":"echo wired","description":"dispatch test"}"#,
+        ])
+        .unwrap();
+        let dir = TempDir::new().unwrap();
+        dispatch(cli, dir.path()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_missing_name_returns_err() {
+        let dir = TempDir::new().unwrap();
+        let err = opencode_cli::tool_cmd::run("no_such_tool", None, "text", dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not") || err.to_string().contains("no_such_tool"));
     }
 }

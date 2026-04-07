@@ -313,15 +313,7 @@ fn map_chunk(chunk: &GenerateContentResponse) -> Vec<ModelEvent> {
             // Only emit Done on a terminal finish reason (not UNSPECIFIED / empty).
             let normalized = reason.to_lowercase();
             if !normalized.is_empty() && normalized != "finish_reason_unspecified" {
-                let mapped = match normalized.as_str() {
-                    "stop" => "stop",
-                    "max_tokens" => "max_tokens",
-                    "safety" => "safety",
-                    other => other,
-                };
-                out.push(ModelEvent::Done {
-                    reason: mapped.to_string(),
-                });
+                out.push(ModelEvent::Done { reason: normalized });
             }
         }
     }

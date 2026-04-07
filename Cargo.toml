@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 authors = ["DannyX"]
 edition = "2024"
 rust-version = "1.85"
@@ -103,6 +103,12 @@ tempfile = "3"
 # testing
 tokio-test = "0.4"
 wiremock = "0.6"
+
+# filesystem traversal / search (used by opencode-tool built-ins)
+walkdir = "2"
+globset = "0.4"
+ignore = "0.4"
+regex = "1"
 
 [workspace.lints.clippy]
 complexity = { level = "warn", priority = -1 }
