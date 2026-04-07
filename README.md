@@ -1,6 +1,6 @@
 # opencode-rs
 
-Rust port of [opencode](https://github.com/opencode-ai/opencode) — an open source AI coding agent.
+Rust port of [opencode](https://github.com/anomalyco/opencode) — an open source AI coding agent.
 
 > **Status**: Active development — Phase 3 complete. Core tool infrastructure, HTTP API server,
 > and manual CLI tool invocation are functional. TUI and full agent loop are planned for
@@ -37,7 +37,7 @@ Rust port of [opencode](https://github.com/opencode-ai/opencode) — an open sou
 
 ```sh
 # Clone
-git clone https://github.com/opencode-ai/opencode
+git clone https://github.com/anomalyco/opencode
 cd opencode/opencode-rs
 
 # Build

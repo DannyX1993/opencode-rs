@@ -17,11 +17,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 authors = ["DannyX"]
 edition = "2024"
 rust-version = "1.85"
-repository = "https://github.com/opencode-ai/opencode"
+repository = "https://github.com/anomalyco/opencode"
 license = "MIT"
 
 # ─── Workspace-level dependencies ────────────────────────────────────────────
