@@ -51,7 +51,9 @@ pub async fn dispatch(cli: Cli, cwd: &Path) -> Result<()> {
 /// Returns an error if storage init, TCP bind, or serve fails.
 pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
     use opencode_bus::BroadcastBus;
-    use opencode_provider::{AnthropicProvider, EnvAuthResolver, ModelRegistry, OpenAiProvider};
+    use opencode_provider::{
+        AnthropicProvider, EnvAuthResolver, GoogleProvider, ModelRegistry, OpenAiProvider,
+    };
     use opencode_server::{AppState, build, serve};
     use opencode_session::engine::SessionEngine;
     use opencode_storage::{StorageImpl, connect};
@@ -78,6 +80,10 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
                 "anthropic",
                 Arc::new(AnthropicProvider::new(anthropic_auth)),
             )
+            .await;
+        let google_auth = GoogleProvider::default_auth(cfg.providers.google.clone());
+        registry
+            .register("google", Arc::new(GoogleProvider::new(google_auth)))
             .await;
     }
 
@@ -170,5 +176,54 @@ mod tests {
         assert_eq!(body["status"], "ok");
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_server_registers_google_provider_for_harness() {
+        use reqwest::StatusCode;
+        use std::net::TcpListener;
+
+        // SAFETY: test-scoped env var, restored below.
+        unsafe {
+            std::env::set_var("OPENCODE_MANUAL_HARNESS", "1");
+            std::env::remove_var("GOOGLE_API_KEY");
+            std::env::remove_var("GEMINI_API_KEY");
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let handle = tokio::spawn(async move {
+            start_server(&path, port).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let cli = reqwest::Client::new();
+        let resp = cli
+            .post(format!("http://127.0.0.1:{port}/api/v1/provider/stream"))
+            .json(&serde_json::json!({
+                "provider": "google",
+                "model": "gemini-2.0-flash",
+                "prompt": "hello"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let err = body["error"].as_str().unwrap();
+        assert!(err.contains("google"), "unexpected error: {err}");
+
+        handle.abort();
+
+        // SAFETY: cleanup for test-scoped env var.
+        unsafe {
+            std::env::remove_var("OPENCODE_MANUAL_HARNESS");
+        }
     }
 }
