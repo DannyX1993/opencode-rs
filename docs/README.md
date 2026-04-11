@@ -1,24 +1,30 @@
 # docs/
 
-Design and reference documentation for `opencode-rs`.
+Project documentation for the Rust workspace.
 
 ## Contents
 
-| File                                   | Description                                               |
-| -------------------------------------- | --------------------------------------------------------- |
-| [MANUAL_TESTING.md](MANUAL_TESTING.md) | Step-by-step manual verification guide for built-in tools |
+| File | Purpose |
+| --- | --- |
+| [`MANUAL_TESTING.md`](MANUAL_TESTING.md) | Manual validation of the provider streaming harness |
 
-## About
+## What Belongs Here
 
-This directory contains design notes, testing guides, and reference material
-for the `opencode-rs` Rust port. All significant changes follow the
-Spec-Driven Development (SDD) workflow:
+- Testing guides that describe how to exercise behavior outside unit tests
+- Workspace-level notes that should stay accurate even as implementation changes
+- Documentation that helps contributors understand how the Rust workspace fits together
 
-1. **Proposal** — intent and scope
-2. **Spec** — requirements and scenarios
-3. **Design** — architecture decisions
-4. **Tasks** — implementation checklist
-5. **Apply** — code changes with TDD evidence
-6. **Verify** — validation against spec
+## Current Focus
 
-For code-level documentation, see the rustdoc comments in each crate (`cargo doc --open`).
+The most concrete operational guide today is the provider harness manual test flow. That reflects the current codebase: the HTTP server, provider adapters, and storage layer exist, while the full interactive session loop is still incomplete.
+
+## How To Verify Docs Against Code
+
+Useful commands from the workspace root:
+
+```sh
+cargo test -p opencode-server -p opencode-provider
+cargo run -p opencode -- server --port 4141
+```
+
+If documentation here mentions HTTP routes or runtime behavior, it should match the Rust code under `crates/opencode-server/`, not the TypeScript implementation.

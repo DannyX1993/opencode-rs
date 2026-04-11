@@ -1635,7 +1635,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opencode"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-bus"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "futures",
  "insta",
@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-cli"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-lsp"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "opencode-core",
  "serde",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-mcp"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "opencode-core",
  "serde",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-plugin"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "opencode-core",
  "serde",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-provider"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-anthropic",
  "async-openai",
@@ -1764,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-server"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-session"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-storage"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-tool"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -1842,7 +1842,7 @@ dependencies = [
 
 [[package]]
 name = "opencode-tui"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "opencode-core",
  "serde",

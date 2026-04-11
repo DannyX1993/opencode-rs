@@ -1,45 +1,52 @@
 # opencode-storage
 
-SQLite storage layer for `opencode-rs` using `sqlx`.
+SQLite-backed persistence layer for the Rust workspace.
 
-> **Status**: ✅ Implemented — schema migrations, session/message/todo/permission/account CRUD.
+## Status
 
----
+Active. This crate contains real repositories, migration bootstrap, and the `Storage` trait used by the server.
 
 ## Purpose
 
-`opencode-storage` provides persistent storage for sessions, messages, todos,
-permissions, and accounts. It uses SQLite via `sqlx` with async runtime support.
+`opencode-storage` owns the persistent data boundary for the Rust workspace. It exposes a trait-based facade and a concrete SQLite implementation.
 
----
+## What Exists Today
+
+- `connect(path)` to open a SQLite pool and run migrations
+- `Storage` trait used by higher layers
+- `StorageImpl` backed by `sqlx`
+- repositories for projects, sessions, messages, todos, permissions, and accounts
+- append-only sync event storage
+
+## Data Surface
+
+The `Storage` trait currently supports:
+
+- projects
+- sessions
+- messages and parts
+- todos
+- permissions
+- accounts
+- raw sync events
+
+`list_history_with_parts` is the richer message-history API used by the server routes.
 
 ## Usage
 
 ```rust
-use opencode_storage::{StorageImpl, connect};
-use std::path::Path;
+use opencode_storage::{connect, StorageImpl};
 
-let pool = connect(Path::new("opencode.db")).await?;
+let pool = connect(std::path::Path::new("opencode.db")).await?;
 let storage = StorageImpl::new(pool);
 ```
 
-`connect()` runs migrations automatically on first connection.
+## Test
 
----
+```sh
+cargo test -p opencode-storage
+```
 
-## Storage Operations
+## Workspace Role
 
-The `Storage` trait provides:
-
-- **Projects**: create, read, list, delete
-- **Sessions**: create, read, update, list, delete
-- **Messages**: append, list by session
-- **Todos**: create, read, update, delete
-- **Permissions**: create, read, list, delete
-- **Accounts**: create, read, list, delete
-- **Events**: emit, subscribe (via event bus integration)
-
-All operations are async and return `Result<T, StorageError>`.
-
-> **Note**: Artifact or blob storage is not yet implemented. The `Storage` trait
-> covers structured relational records only.
+This crate is the persistence backend for the current Rust server. The binary uses it when starting `opencode server`, creating or reusing `./opencode.db` in the current working directory.

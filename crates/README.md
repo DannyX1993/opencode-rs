@@ -1,31 +1,58 @@
 # crates/
 
-Workspace crates for `opencode-rs`.
+Rust library crates used by the `opencode-rs` workspace.
+
+## Scope
+
+This directory contains reusable Rust crates only. The runnable binary lives in `../opencode/`.
 
 ## Crate Index
 
-| Crate                                  | Status      | Description                                             |
-| -------------------------------------- | ----------- | ------------------------------------------------------- |
-| [opencode-tool](opencode-tool)         | ✅ Complete | Tool trait, `ToolRegistry`, 6 built-in tools            |
-| [opencode-cli](opencode-cli)           | ✅ Complete | CLI parsing (`clap`), bootstrap, `tool` subcommand      |
-| [opencode-core](opencode-core)         | ✅ Complete | Config loader (JSONC), tracing init, shared types       |
-| [opencode-provider](opencode-provider) | ✅ Complete | OpenAI, Anthropic, Google LLM provider adapters         |
-| [opencode-server](opencode-server)     | ✅ Partial  | Axum HTTP API — health, session, and provider endpoints |
-| [opencode-storage](opencode-storage)   | ✅ Complete | SQLite async storage via `sqlx`                         |
-| [opencode-session](opencode-session)   | 🔲 Stub     | Session engine placeholder                              |
-| [opencode-bus](opencode-bus)           | 🔲 Stub     | Broadcast event bus placeholder                         |
-| [opencode-lsp](opencode-lsp)           | 🔲 Planned  | Language Server Protocol integration                    |
-| [opencode-mcp](opencode-mcp)           | 🔲 Planned  | Model Context Protocol support                          |
-| [opencode-plugin](opencode-plugin)     | 🔲 Planned  | Plugin system                                           |
-| [opencode-tui](opencode-tui)           | 🔲 Planned  | Terminal user interface                                 |
+| Crate | Status | Purpose |
+| --- | --- | --- |
+| [`opencode-bus`](opencode-bus) | partial | Typed broadcast bus and shared event enums |
+| [`opencode-cli`](opencode-cli) | active | Clap CLI types, bootstrap flow, `tool` command dispatch |
+| [`opencode-core`](opencode-core) | active | Shared DTOs, config, IDs, errors, tracing |
+| [`opencode-lsp`](opencode-lsp) | stub | Placeholder for future LSP integration |
+| [`opencode-mcp`](opencode-mcp) | stub | Placeholder for future MCP integration |
+| [`opencode-plugin`](opencode-plugin) | stub | Placeholder for future plugin hosting |
+| [`opencode-provider`](opencode-provider) | active | Provider registry and OpenAI/Anthropic/Google adapters |
+| [`opencode-server`](opencode-server) | active | Axum router and HTTP endpoints |
+| [`opencode-session`](opencode-session) | stub | Session trait plus stub engine |
+| [`opencode-storage`](opencode-storage) | active | SQLite persistence and repositories |
+| [`opencode-tool`](opencode-tool) | active | Tool runtime and built-in file/shell tools |
+| [`opencode-tui`](opencode-tui) | stub | Placeholder for future terminal UI |
 
-## Status Legend
+## Status Notes
 
-| Symbol      | Meaning                                              |
-| ----------- | ---------------------------------------------------- |
-| ✅ Complete | Implemented, tested, and ≥85% covered                |
-| ✅ Partial  | Core functionality works; some features pending      |
-| 🔲 Stub     | Crate exists with minimal scaffolding; logic pending |
-| 🔲 Planned  | Not yet started                                      |
+- `active` means the crate has real code used by the current binary or tests.
+- `partial` means part of the intended surface exists, but not all planned behavior is implemented yet.
+- `stub` means the crate mostly exists to reserve the package boundary and public API direction.
 
-See the [workspace README](../README.md) for build and usage instructions.
+## Build And Test
+
+Build all crates from the workspace root:
+
+```sh
+cargo build --workspace
+```
+
+Test all crates from the workspace root:
+
+```sh
+cargo test --workspace
+```
+
+Target a single crate while iterating:
+
+```sh
+cargo test -p opencode-storage
+```
+
+## Relationship To The Rest Of The Workspace
+
+- `../opencode/` turns these crates into the runnable `opencode` binary.
+- `../docs/` documents testing and workspace behavior.
+- `../scripts/` contains helper scripts for quality checks such as coverage.
+
+Each immediate crate directory should have its own README describing its current state and limitations.

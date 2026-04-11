@@ -1,52 +1,49 @@
 # opencode-provider
 
-AI model provider adapters for `opencode-rs`.
+Provider abstraction and concrete LLM adapters for the Rust workspace.
 
-> **Status**: ✅ Complete — OpenAI, Anthropic, and Google (Gemini) adapters implemented.
+## Status
 
----
+Active. This crate contains real provider implementations and registry logic used by the manual server harness today.
 
-## Purpose
+## What Exists Today
 
-`opencode-provider` implements the `ModelProvider` trait for each supported AI backend.
-Each provider handles auth, request serialisation, streaming SSE parsing, and error mapping.
+- `LanguageModel` trait
+- `ModelRegistry`
+- auth resolver helpers
+- SSE parsing helpers
+- concrete adapters for OpenAI, Anthropic, and Google
+- tests that exercise registry behavior and provider streaming paths
 
----
+## Current Usage In The Workspace
+
+The `opencode` binary registers providers into a `ModelRegistry` when `OPENCODE_MANUAL_HARNESS=1` is set, and `opencode-server` exposes `POST /api/v1/provider/stream` as a manual validation route.
+
+That route is not positioned as a stable public API. It exists to validate real streaming behavior against providers.
 
 ## Supported Providers
 
-| Provider        | Struct              | Auth env var(s)                      |
-| --------------- | ------------------- | ------------------------------------ |
-| OpenAI          | `OpenAiProvider`    | `OPENAI_API_KEY`                     |
-| Anthropic       | `AnthropicProvider` | `ANTHROPIC_API_KEY`                  |
-| Google (Gemini) | `GoogleProvider`    | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
+| Provider id | Current role |
+| --- | --- |
+| `openai` | real adapter |
+| `anthropic` | real adapter |
+| `google` | real adapter |
 
----
+## Configuration
 
-## Usage
+Auth may come from config or environment depending on the provider path in use. Common environment variables include:
 
-```rust
-use opencode_provider::{ModelRegistry, OpenAiProvider};
-use std::sync::Arc;
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GOOGLE_API_KEY`
+- `GEMINI_API_KEY`
 
-let registry = ModelRegistry::new();
-let auth = OpenAiProvider::default_auth(None);
-registry.register("openai", Arc::new(OpenAiProvider::new(auth))).await;
+## Test
+
+```sh
+cargo test -p opencode-provider
 ```
 
-Providers are registered into a `ModelRegistry` and injected into `AppState`.
-The HTTP server routes `/api/v1/provider/stream` requests through the registry.
+## Workspace Role
 
----
-
-## Module Map
-
-```
-src/
-├── lib.rs       — re-exports
-├── openai.rs    — OpenAI chat completions + streaming
-├── anthropic.rs — Anthropic messages API + streaming
-├── google.rs    — Google AI Studio (Gemini) + streaming
-├── registry.rs  — ModelRegistry
-└── types.rs     — ModelRequest, ModelEvent, ProviderError
-```
+This crate is the provider-facing edge of the Rust workspace. The full agent loop is still incomplete, but provider streaming and registry behavior are already implemented here.

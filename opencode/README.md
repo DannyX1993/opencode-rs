@@ -1,58 +1,50 @@
-# opencode (binary)
+# opencode
 
-The `opencode` binary crate — thin entrypoint and command dispatcher.
+Binary crate for the Rust `opencode` executable.
 
-> **Status**: ✅ Active — builds and runs. Dispatches all CLI subcommands.
-> TUI and full agent loop are planned for later phases.
+## Purpose
 
----
+This crate is the runnable entrypoint for the workspace. It keeps `src/main.rs` minimal and puts command dispatch in `src/lib.rs` so behavior can be tested without spawning a separate process.
 
-## Structure
+## Current Commands
 
-| File          | Role                                                                   |
-| ------------- | ---------------------------------------------------------------------- |
-| `src/main.rs` | Binary entry point — parses CLI args, runs bootstrap, calls `dispatch` |
-| `src/lib.rs`  | Testable dispatch logic + `start_server` helper                        |
+| Command | Status | Current behavior |
+| --- | --- | --- |
+| default / `run` | stub | Logs that TUI mode is not implemented yet |
+| `server --port <n>` | active | Starts the Axum HTTP server and initializes SQLite storage |
+| `prompt <text>` | stub | Logs that one-shot prompt mode is not implemented yet |
+| `version` | active | Prints `opencode <version>` |
+| `config --show` | active | Loads merged config and prints it as JSON |
+| `config` | stub | Logs that config editing is not implemented yet |
+| `tool <name>` | active | Delegates to `opencode-cli::tool_cmd::run` |
 
-`main.rs` is intentionally minimal (≤15 lines). All branching lives in `lib.rs`
-so every command path can be exercised by unit tests without spawning a process.
+## Runtime Behavior
 
----
+- The current working directory is used as the project root.
+- Starting the server creates or opens `./opencode.db`.
+- `OPENCODE_MANUAL_HARNESS=1` enables the manual provider streaming route.
+- Standard providers are registered for the harness only when that environment variable is set.
 
-## Subcommands
+## Run
 
-| Subcommand       | Status     | Description                                |
-| ---------------- | ---------- | ------------------------------------------ |
-| _(none)_ / `run` | 🔲 Stub    | Interactive TUI — logs a stub message      |
-| `server`         | ✅ Working | Start Axum HTTP API on the configured port |
-| `prompt <text>`  | 🔲 Stub    | One-shot prompt — logs a stub message      |
-| `version`        | ✅ Working | Print binary version                       |
-| `config --show`  | ✅ Working | Print merged config as JSON                |
-| `tool <NAME>`    | ✅ Working | Invoke a built-in tool (see root README)   |
-
----
-
-## Exit Codes
-
-| Code | Meaning                                          |
-| ---- | ------------------------------------------------ |
-| 0    | Successful                                       |
-| 1    | Runtime error (tool failure, config error, etc.) |
-| 2    | CLI parse error (missing arg, unknown flag)      |
-
----
-
-## Development
-
-Build and run from the workspace root:
+From the workspace root:
 
 ```sh
-cargo build -p opencode
-cargo run -p opencode -- tool bash --args-json '{"command":"echo hi","description":"test"}'
+cargo run -p opencode -- version
+cargo run -p opencode -- config --show
+cargo run -p opencode -- tool bash --args-json '{"command":"pwd","description":"print cwd"}'
 ```
 
-Tests live in `src/lib.rs` and cover all dispatch branches:
+Start the server:
+
+```sh
+cargo run -p opencode -- server --port 4141
+```
+
+## Test
 
 ```sh
 cargo test -p opencode --lib
 ```
+
+The library tests cover dispatch branches and a basic server startup path.

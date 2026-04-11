@@ -1,22 +1,40 @@
 # opencode-bus
 
-Broadcast event bus for `opencode-rs`.
+Typed in-process event bus for the Rust workspace.
 
-> **Status**: ✅ Stub — `BroadcastBus` struct implemented; event routing logic pending.
+## Status
 
----
+Partial. The crate has a real `tokio::broadcast`-backed bus and a concrete `BusEvent` enum, but higher-level routing and richer consumers are still to come.
 
-## Purpose
+## What Exists Today
 
-`opencode-bus` provides a tokio-broadcast-backed event bus used to fan out
-agent events (tool calls, streaming chunks, session state changes) to multiple
-consumers (SSE clients, TUI, logger).
+- `EventBus` trait
+- `BroadcastBus` implementation
+- `BusEvent` variants for session, message, tool, provider, permission, todo, and config events
+- `EventKind` for coarse-grained filtering
+
+## What Does Not Exist Yet
+
+- a separate filtered channel implementation per event kind
+- end-to-end integration of bus events across the full session engine
+
+## Usage
 
 ```rust
-use opencode_bus::BroadcastBus;
+use opencode_bus::{BroadcastBus, EventBus};
 
-let bus = BroadcastBus::new(64); // channel capacity
+let bus = BroadcastBus::new(64);
+let mut rx = bus.subscribe();
 ```
 
-The bus is wired into `AppState` and passed to the HTTP server.
-Full publish/subscribe API arrives in Phase 5.
+`publish` returns an error when no receivers are subscribed. The current implementation treats that as a non-fatal condition.
+
+## Test
+
+```sh
+cargo test -p opencode-bus
+```
+
+## Workspace Role
+
+`opencode-server` and future session orchestration code depend on this crate for event fan-out inside the process.

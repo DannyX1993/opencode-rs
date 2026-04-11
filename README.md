@@ -1,178 +1,157 @@
 # opencode-rs
 
-Rust port of [opencode](https://github.com/anomalyco/opencode) — an open source AI coding agent.
+Rust workspace for the `opencode` agent runtime and supporting libraries.
 
-> **Status**: Active development — Phase 3 complete. Core tool infrastructure, HTTP API server,
-> and manual CLI tool invocation are functional. TUI and full agent loop are planned for
-> later phases.
+## Status
 
----
+`opencode-rs` builds a real CLI, a headless HTTP server, provider adapters, and a SQLite-backed storage layer. Several crates in the workspace are still stubs or placeholders, so this workspace is not yet a complete replacement for the TypeScript implementation.
+
+This README documents only the Rust workspace in this directory. `opencode-ts/` is intentionally out of scope.
 
 ## Workspace Layout
 
-| Crate                                           | Status      | Description                                    |
-| ----------------------------------------------- | ----------- | ---------------------------------------------- |
-| [`opencode-tool`](crates/opencode-tool)         | ✅ Complete | Tool trait, registry, 6 built-in tools         |
-| [`opencode-cli`](crates/opencode-cli)           | ✅ Complete | CLI parsing, bootstrap, `tool` subcommand      |
-| [`opencode-core`](crates/opencode-core)         | ✅ Complete | Config, tracing init                           |
-| [`opencode-provider`](crates/opencode-provider) | ✅ Complete | OpenAI, Anthropic, Google provider adapters    |
-| [`opencode-server`](crates/opencode-server)     | ✅ Partial  | REST API + SSE streaming                       |
-| [`opencode-storage`](crates/opencode-storage)   | ✅ Complete | SQLite storage layer (sqlx)                    |
-| [`opencode-session`](crates/opencode-session)   | 🔲 Stub     | Session engine (wiring present, logic pending) |
-| [`opencode-bus`](crates/opencode-bus)           | 🔲 Stub     | Broadcast event bus                            |
-| [`opencode-lsp`](crates/opencode-lsp)           | 🔲 Planned  | Language Server Protocol integration           |
-| [`opencode-mcp`](crates/opencode-mcp)           | 🔲 Planned  | Model Context Protocol support                 |
-| [`opencode-plugin`](crates/opencode-plugin)     | 🔲 Planned  | Plugin system                                  |
-| [`opencode-tui`](crates/opencode-tui)           | 🔲 Planned  | Terminal user interface                        |
-| [`opencode`](opencode)                          | ✅ Active   | Binary entrypoint + dispatch                   |
+| Path | Type | Status | Purpose |
+| --- | --- | --- | --- |
+| `opencode/` | binary crate | active | Binary entrypoint and command dispatch |
+| `crates/opencode-cli/` | library crate | active | Clap CLI definitions, bootstrap, `tool` command wiring |
+| `crates/opencode-core/` | library crate | active | Shared config, DTOs, IDs, errors, tracing helpers |
+| `crates/opencode-provider/` | library crate | active | Provider trait, registry, OpenAI/Anthropic/Google adapters |
+| `crates/opencode-server/` | library crate | active | Axum router, health route, project/session/message API, provider harness |
+| `crates/opencode-storage/` | library crate | active | SQLite persistence, migrations, repositories, event store |
+| `crates/opencode-tool/` | library crate | active | Tool trait, registry, built-in read/list/glob/grep/write/bash tools |
+| `crates/opencode-bus/` | library crate | partial | Typed in-process broadcast bus with published event types |
+| `crates/opencode-session/` | library crate | stub | Session trait surface plus stub engine returning `NotFound` |
+| `crates/opencode-lsp/` | library crate | stub | Placeholder for future LSP integration |
+| `crates/opencode-mcp/` | library crate | stub | Placeholder for future MCP integration |
+| `crates/opencode-plugin/` | library crate | stub | Placeholder for future plugin host |
+| `crates/opencode-tui/` | library crate | stub | Placeholder for future terminal UI |
+| `docs/` | docs | active | Manual testing and workspace documentation |
+| `scripts/` | scripts | active | Helper scripts such as coverage reporting |
 
----
+## Version
+
+Current Rust workspace version: `0.5.0`
+
+The workspace uses `version.workspace = true`, so crate package versions inherit from the root `Cargo.toml`.
+
+## What Works Today
+
+- `cargo run -p opencode -- version` prints the binary version.
+- `cargo run -p opencode -- config --show` prints merged configuration as JSON.
+- `cargo run -p opencode -- tool ...` invokes built-in tools directly.
+- `cargo run -p opencode -- server` starts an Axum server with `/health` plus project/session/message routes.
+- `POST /api/v1/provider/stream` exists only as a manual harness and is disabled unless `OPENCODE_MANUAL_HARNESS=1` is set.
+- SQLite storage is initialized from the current working directory using `opencode.db`.
+
+## What Is Still Incomplete
+
+- `run` currently logs a stub message instead of launching a TUI.
+- `prompt <text>` currently logs a stub message instead of executing a full agent loop.
+- `config` without `--show` currently logs a stub message.
+- `opencode-session` does not yet implement the real session engine.
+- `opencode-lsp`, `opencode-mcp`, `opencode-plugin`, and `opencode-tui` are scaffolding crates with minimal code.
 
 ## Quick Start
 
-### Prerequisites
+Prerequisites:
 
-- Rust 1.85+ (see `rust-toolchain.toml` or `Cargo.toml`)
-- `cargo-llvm-cov` for coverage reports (optional)
+- Rust `1.85` or newer
+- SQLite runtime support available for `sqlx` builds
+- Optional: `cargo-llvm-cov` for coverage reports
+
+Build the Rust binary:
 
 ```sh
-# Clone
-git clone https://github.com/anomalyco/opencode
-cd opencode/opencode-rs
-
-# Build
 cargo build -p opencode
+```
 
-# Run (interactive TUI — not yet implemented, logs a stub message)
-cargo run -p opencode
+Show the merged config for the current project:
 
-# Run the HTTP API server on port 4141
-cargo run -p opencode -- server --port 4141
-
-# Print current config as JSON
+```sh
 cargo run -p opencode -- config --show
 ```
 
----
-
-## Manual Tool Invocation
-
-The `tool` subcommand lets you invoke any built-in tool directly from the shell.
-This is useful for scripting, debugging, and verifying tool behaviour.
-
-Bootstrap logs are always written to **stderr**; stdout carries only tool output,
-making JSON mode safe for piping and scripting.
-
-### Syntax
+Run a built-in tool directly:
 
 ```sh
-opencode tool <TOOL_NAME> [--args-json '<JSON>'] [--output text|json]
-```
-
-The `--output` flag accepts exactly `text` (default) or `json`. Any other value
-is rejected with exit code 1.
-
-### Examples
-
-```sh
-# Read a file (first 5 lines)
 cargo run -p opencode -- tool read \
-  --args-json '{"filePath":"Cargo.toml","limit":5}'
-
-# List directory tree
-cargo run -p opencode -- tool list \
-  --args-json '{"path":"crates"}'
-
-# Glob for Rust source files
-cargo run -p opencode -- tool glob \
-  --args-json '{"pattern":"**/*.rs","path":"crates/opencode-tool"}'
-
-# Grep for a pattern
-cargo run -p opencode -- tool grep \
-  --args-json '{"pattern":"pub fn","path":"crates/opencode-tool","include":"*.rs"}'
-
-# Write a file
-cargo run -p opencode -- tool write \
-  --args-json '{"filePath":"/tmp/hello.txt","content":"hello world\n"}'
-
-# Run a shell command
-cargo run -p opencode -- tool bash \
-  --args-json '{"command":"echo hello from opencode","description":"greet"}'
-
-# JSON output — stdout is clean JSON, bootstrap logs go to stderr
-cargo run -p opencode -- tool bash \
-  --args-json '{"command":"pwd","description":"print cwd"}' \
-  --output json
+  --args-json '{"filePath":"Cargo.toml","limit":10}'
 ```
 
-### Available Tools
-
-| Tool name | Description                        | TS equivalent |
-| --------- | ---------------------------------- | ------------- |
-| `read`    | Read a file or directory listing   | `ReadTool`    |
-| `list`    | Directory tree view                | `ListTool`    |
-| `glob`    | Find files matching a glob pattern | `GlobTool`    |
-| `grep`    | Search file contents with regex    | `GrepTool`    |
-| `write`   | Write content to a file            | `WriteTool`   |
-| `bash`    | Execute a shell command            | `BashTool`    |
-
-### Exit Codes
-
-| Code | Meaning                                                                      |
-| ---- | ---------------------------------------------------------------------------- |
-| 0    | Tool ran successfully                                                        |
-| 1    | Tool error (not found, invalid args, exec failure, invalid `--output` value) |
-| 2    | CLI parse error (missing required arg, unknown flag — clap default)          |
-
----
-
-## Running Tests
+Start the HTTP server on port `4141`:
 
 ```sh
-# All tests for the core crates
-cargo test -p opencode-tool -p opencode-cli -p opencode --lib
-
-# Full workspace
-cargo test --workspace --lib
-
-# Coverage report (requires cargo-llvm-cov)
-cargo llvm-cov -p opencode-tool --summary-only
-cargo llvm-cov -p opencode-cli --summary-only
+cargo run -p opencode -- server --port 4141
 ```
 
-Current coverage (Phase 3):
+Call the health route:
 
-| Crate           | Line | Region |
-| --------------- | ---- | ------ |
-| `opencode-tool` | ≥96% | ≥94%   |
-| `opencode-cli`  | ≥95% | ≥94%   |
+```sh
+curl http://127.0.0.1:4141/health
+```
 
----
+## HTTP Surface
 
-## Architecture Notes
+Routes currently wired by `opencode-server`:
 
-- `opencode-tool` is the heart: it defines the `Tool` trait and all built-in implementations.
-- `opencode-cli` is deliberately thin — it only parses flags and delegates to `tool_cmd::run`.
-- The `Ctx` struct carries project root, CWD, shell path, and timeout — it threads through every tool invocation.
-- GlobTool and GrepTool use native Rust crates (`globset`, `regex`, `walkdir`) instead of spawning `rg`, giving deterministic, subprocess-free behaviour.
-- All tracing output goes to **stderr** — stdout is reserved for tool output only.
+- `GET /health`
+- `GET /api/v1/projects`
+- `PUT /api/v1/projects/:id`
+- `GET /api/v1/projects/:id`
+- `POST /api/v1/projects/:pid/sessions`
+- `GET /api/v1/projects/:pid/sessions`
+- `GET /api/v1/sessions/:sid`
+- `PATCH /api/v1/sessions/:sid`
+- `GET /api/v1/sessions/:sid/messages`
+- `POST /api/v1/sessions/:sid/messages`
+- `POST /api/v1/provider/stream` only when `OPENCODE_MANUAL_HARNESS=1`
 
----
+The provider stream route is a manual validation endpoint, not a stable public API.
 
-## Contributing
+## Configuration
 
-See [`docs/`](docs/) for design notes. All changes must follow the Spec-Driven Development
-flow (proposal → spec → design → tasks → apply → verify).
+`opencode-core::Config::load` merges configuration in this order:
 
-Rust style guidelines:
+1. `~/.config/opencode/config.jsonc`
+2. `<project>/.opencode/config.jsonc`
+3. Environment variables such as `OPENCODE_MODEL`, `OPENCODE_LOG_LEVEL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, and `OPENCODE_SERVER_PORT`
 
-- Single-word identifiers by default
-- No `try/catch` equivalents (use `?` and `anyhow`)
-- `cargo clippy -- -D warnings` must be clean
-- Coverage gate: ≥85% line and region per crate
+The binary also creates or reuses `opencode.db` in the current working directory when the server starts.
 
----
+## Testing
 
-## License
+Run the full Rust workspace tests:
 
-MIT — see [LICENSE](../LICENSE) or `Cargo.toml` workspace metadata.
+```sh
+cargo test --workspace
+```
+
+Run a narrower validation pass while editing docs or CLI behavior:
+
+```sh
+cargo test -p opencode -p opencode-cli -p opencode-server
+```
+
+Generate coverage summaries:
+
+```sh
+./scripts/coverage.sh
+./scripts/coverage.sh --check
+```
+
+Manual provider-harness testing steps live in `docs/MANUAL_TESTING.md`.
+
+## Relationship Between Crates
+
+- `opencode` is the runnable binary and depends on the library crates.
+- `opencode-cli` parses commands and delegates `tool` execution to `opencode-tool`.
+- `opencode-server` exposes HTTP routes over `opencode-storage`, `opencode-provider`, `opencode-session`, and `opencode-bus`.
+- `opencode-storage` owns persistence and schema compatibility with the existing SQLite layout.
+- `opencode-session` is intended to orchestrate the agent loop, but today it is still a stub.
+
+## More Documentation
+
+- `crates/README.md` for the crate index
+- `docs/README.md` for available documentation
+- `opencode/README.md` for binary-specific notes
+- `scripts/README.md` for helper scripts

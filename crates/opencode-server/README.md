@@ -1,39 +1,53 @@
 # opencode-server
 
-Axum HTTP API server for `opencode-rs`.
+Axum HTTP server for the Rust workspace.
 
-> **Status**: ✅ Implemented — health endpoint, provider streaming, session routes (partial).
+## Status
 
----
+Active. The crate has real routes, router tests, and is used by `cargo run -p opencode -- server`.
 
-## Purpose
+## Routes Wired Today
 
-`opencode-server` builds the Axum router that exposes the opencode REST API.
-It is used in headless mode (`opencode server`) and by integration tests.
+| Method | Path | Current behavior |
+| --- | --- | --- |
+| `GET` | `/health` | returns `{ "status": "ok" }` |
+| `GET` | `/api/v1/projects` | lists projects from storage |
+| `PUT` | `/api/v1/projects/{id}` | upserts a project |
+| `GET` | `/api/v1/projects/{id}` | fetches one project |
+| `POST` | `/api/v1/projects/{pid}/sessions` | creates a session row |
+| `GET` | `/api/v1/projects/{pid}/sessions` | lists sessions for a project |
+| `GET` | `/api/v1/sessions/{sid}` | fetches one session |
+| `PATCH` | `/api/v1/sessions/{sid}` | updates mutable session fields |
+| `GET` | `/api/v1/sessions/{sid}/messages` | lists messages with parts |
+| `POST` | `/api/v1/sessions/{sid}/messages` | appends a message and parts |
+| `POST` | `/api/v1/provider/stream` | manual SSE harness, only when enabled |
 
----
+## Important Limitations
 
-## Endpoints
+- The provider stream route returns `403` unless `OPENCODE_MANUAL_HARNESS=1` was set at startup.
+- The session engine dependency is still a stub crate, so these HTTP routes currently operate as storage-oriented endpoints rather than a full conversational runtime.
+- This crate does not currently expose a complete public API contract for all future agent features.
 
-| Method | Path                      | Description                              |
-| ------ | ------------------------- | ---------------------------------------- |
-| `GET`  | `/health`                 | Health check — returns `{"status":"ok"}` |
-| `POST` | `/api/v1/provider/stream` | Stream completions from a provider       |
-| `GET`  | `/api/v1/session`         | List sessions (stub)                     |
-| `POST` | `/api/v1/session`         | Create session (stub)                    |
+## Run
 
----
+From the workspace root:
 
-## Usage
-
-```rust
-use opencode_server::{AppState, build, serve};
-use std::net::SocketAddr;
-
-let router = build(state);
-let addr: SocketAddr = "0.0.0.0:4141".parse()?;
-serve(router, addr).await?;
+```sh
+cargo run -p opencode -- server --port 4141
 ```
 
-`AppState` bundles config, bus, storage, session engine, and model registry.
-All are `Arc`-wrapped for cheap cloning across handlers.
+Enable the manual provider harness:
+
+```sh
+OPENCODE_MANUAL_HARNESS=1 cargo run -p opencode -- server --port 4141
+```
+
+## Test
+
+```sh
+cargo test -p opencode-server
+```
+
+## Workspace Role
+
+`opencode-server` sits on top of `opencode-storage`, `opencode-provider`, `opencode-session`, and `opencode-bus` to expose the Rust runtime over HTTP.

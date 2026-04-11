@@ -1,73 +1,45 @@
 # opencode-core
 
-Foundation types for `opencode-rs`: configuration loading, tracing initialisation,
-shared DTOs, error types, and ID generation.
+Lowest-level shared types for the Rust workspace.
 
-> **Status**: ✅ Complete — Config, tracing init, and core types implemented.
+## Status
 
----
+Active. This crate provides foundational code used across the current binary, server, storage, and provider layers.
 
 ## Purpose
 
-`opencode-core` is the dependency-free foundation that every other crate builds on.
-It has no circular dependencies and no optional heavy features.
+`opencode-core` centralizes the common pieces that should not depend on higher-level runtime crates:
 
----
+- cascading JSONC config loading
+- typed IDs
+- DTOs shared between storage and HTTP layers
+- workspace error types
+- tracing bootstrap helpers
+- async context helpers and boxed stream aliases
 
-## Key Components
+## Configuration Behavior
 
-| Module    | Description                                                                  |
-| --------- | ---------------------------------------------------------------------------- |
-| `config`  | `Config` struct — loads from `~/.opencode/config.jsonc` and project dir      |
-| `tracing` | `init(cfg)` — sets up `tracing-subscriber` with env-filter and optional JSON |
-| `dto`     | Shared data transfer objects                                                 |
-| `error`   | `CoreError` — base error type                                                |
-| `id`      | UUID-based ID generation helpers                                             |
-| `context` | Request context threading                                                    |
+`Config::load(project_dir)` merges:
 
----
+1. `~/.config/opencode/config.jsonc`
+2. `<project_dir>/.opencode/config.jsonc`
+3. environment variables
 
-## Config Fields (key ones)
+Environment support includes keys such as `OPENCODE_MODEL`, `OPENCODE_LOG_LEVEL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, and `OPENCODE_SERVER_PORT`.
 
-```rust
-pub struct Config {
-    pub log_level: String,      // default: "info"
-    pub log_json: bool,         // default: false
-    pub model: Option<String>,  // AI model to use
-    pub server: ServerConfig,   // port: 4141
-    pub providers: ProvidersConfig,
-    // ...
-}
+## Why Other Crates Depend On It
+
+- `opencode-cli` uses config and tracing bootstrap
+- `opencode-server` uses shared DTOs and typed errors
+- `opencode-storage` uses DTOs and typed IDs for persistence contracts
+- `opencode-provider` uses shared streaming and error-adjacent types
+
+## Test
+
+```sh
+cargo test -p opencode-core
 ```
 
-Config is loaded with `Config::load(project_dir)`. It merges:
+## Notes
 
-1. Built-in defaults
-2. `~/.opencode/config.jsonc` (global)
-3. `<project_dir>/.opencode/config.jsonc` (project-local)
-
----
-
-## Tracing Init
-
-```rust
-use opencode_core::{config::Config, tracing};
-
-let cfg = Config::load(dir).await?;
-tracing::init(&cfg);  // sets up subscriber based on log_level + log_json
-```
-
----
-
-## Module Map
-
-```
-src/
-├── lib.rs       — pub mod declarations
-├── config.rs    — Config struct + loading logic
-├── tracing.rs   — tracing subscriber initialisation
-├── dto.rs       — shared DTOs
-├── error.rs     — CoreError
-├── id.rs        — ID generation
-└── context.rs   — request context
-```
+This crate should stay low-level. Business workflow code belongs in higher-level crates.

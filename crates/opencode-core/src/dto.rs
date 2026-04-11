@@ -77,6 +77,9 @@ pub struct SessionRow {
     pub id: SessionId,
     /// Foreign key to `project`.
     pub project_id: ProjectId,
+    /// Optional workspace this session belongs to.
+    #[serde(default)]
+    pub workspace_id: Option<WorkspaceId>,
     /// Optional parent session (sub-agent chains).
     #[serde(default)]
     pub parent_id: Option<SessionId>,
@@ -91,9 +94,24 @@ pub struct SessionRow {
     /// Shareable URL (if enabled).
     #[serde(default)]
     pub share_url: Option<String>,
+    /// Summary line additions.
+    #[serde(default)]
+    pub summary_additions: Option<i64>,
+    /// Summary line deletions.
+    #[serde(default)]
+    pub summary_deletions: Option<i64>,
+    /// Summary changed file count.
+    #[serde(default)]
+    pub summary_files: Option<i64>,
+    /// Summary diff payload.
+    #[serde(default)]
+    pub summary_diffs: Option<serde_json::Value>,
+    /// Revert metadata payload.
+    #[serde(default)]
+    pub revert: Option<serde_json::Value>,
     /// Permission mode override.
     #[serde(default)]
-    pub permission: Option<String>,
+    pub permission: Option<serde_json::Value>,
     /// Unix timestamp (ms) of creation.
     pub time_created: i64,
     /// Unix timestamp (ms) of last update.

@@ -1,24 +1,31 @@
 # opencode-session
 
-Session engine for `opencode-rs` — manages conversation state, turn lifecycle,
-and agent loop orchestration.
+Session abstraction for the future Rust agent loop.
 
-> **Status**: 🔲 Stub — `SessionEngine` struct defined; conversation logic planned for Phase 5.
+## Status
 
----
+Stub. The crate defines the `Session` trait, request/handle types, and a `SessionEngine` that currently returns `SessionError::NotFound` for operations.
 
-## Purpose
+## What Exists Today
 
-`opencode-session` will own the full agent loop: receiving user messages,
-dispatching tool calls via `opencode-tool`, streaming partial results back
-through `opencode-bus`, and persisting session data via `opencode-storage`.
+- `Session` trait with `prompt` and `cancel`
+- typed request/handle structures in `types.rs`
+- `SessionEngine` stub implementation
+- basic tests confirming the stub behavior
 
----
+## What Does Not Exist Yet
 
-## Current State
+- real prompt orchestration
+- tool execution loop
+- provider streaming integration through a live session engine
+- persistence and event fan-out coordinated by the engine itself
 
-The `SessionEngine` struct is wired into `AppState` and the HTTP server but
-its methods are not yet implemented. A placeholder is returned for all session
-operations.
+## Why The Crate Still Matters
 
-Full implementation arrives in Phase 5 (agent loop phase).
+Other crates can depend on the session abstraction now without waiting for the full implementation. `opencode-server` already uses `Arc<dyn Session>` in `AppState`.
+
+## Test
+
+```sh
+cargo test -p opencode-session
+```
