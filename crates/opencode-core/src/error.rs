@@ -105,6 +105,22 @@ pub enum SessionError {
         /// ID of the affected session.
         id: String,
     },
+
+    /// A prompt was requested while another run is active for the same session.
+    #[error("session busy: {0}")]
+    Busy(String),
+
+    /// Provider returned a runtime failure while processing a prompt stream.
+    #[error("session provider error: {0}")]
+    Provider(String),
+
+    /// Runtime failed unexpectedly while orchestrating the turn.
+    #[error("session runtime internal error: {0}")]
+    RuntimeInternal(String),
+
+    /// Cancel was requested but there is no active run for the session.
+    #[error("no active run for session: {0}")]
+    NoActiveRun(String),
 }
 
 /// Errors produced by the HTTP server layer.
@@ -118,4 +134,36 @@ pub enum ServerError {
     /// Internal server error (catch-all).
     #[error("internal server error: {0}")]
     Internal(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionError;
+
+    #[test]
+    fn session_busy_error_message_is_deterministic() {
+        let err = SessionError::Busy("sess-123".into());
+        assert_eq!(err.to_string(), "session busy: sess-123");
+    }
+
+    #[test]
+    fn session_runtime_internal_error_message_is_deterministic() {
+        let err = SessionError::RuntimeInternal("stream processor crashed".into());
+        assert_eq!(
+            err.to_string(),
+            "session runtime internal error: stream processor crashed"
+        );
+    }
+
+    #[test]
+    fn session_provider_error_message_is_deterministic() {
+        let err = SessionError::Provider("model unavailable".into());
+        assert_eq!(err.to_string(), "session provider error: model unavailable");
+    }
+
+    #[test]
+    fn cancel_without_active_run_error_message_is_deterministic() {
+        let err = SessionError::NoActiveRun("sess-777".into());
+        assert_eq!(err.to_string(), "no active run for session: sess-777");
+    }
 }

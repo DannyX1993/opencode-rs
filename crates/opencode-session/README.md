@@ -1,31 +1,53 @@
 # opencode-session
 
-Session abstraction for the future Rust agent loop.
+Session runtime core for the Rust agent loop.
 
 ## Status
 
-Stub. The crate defines the `Session` trait, request/handle types, and a `SessionEngine` that currently returns `SessionError::NotFound` for operations.
+Partial. The crate now has a functional runtime core (`prompt` + `cancel` flow, run-state coordination, provider stream consumption, and incremental assistant-part persistence), but not yet full tool/runtime parity.
 
 ## What Exists Today
 
 - `Session` trait with `prompt` and `cancel`
-- typed request/handle structures in `types.rs`
-- `SessionEngine` stub implementation
-- basic tests confirming the stub behavior
+- `SessionEngine` that:
+  - verifies target session existence
+  - resolves model/provider from request/default config
+  - writes user message + assistant shell into storage
+  - streams provider output and appends text deltas as message parts
+  - publishes lifecycle and token-usage events over `opencode-bus`
+- per-session exclusivity + cancellation support via `RunState`
+- HTTP-facing handle metadata (`assistant_message_id`, `resolved_model`) for route responses
+- runtime-focused tests for streaming, cancellation, run-state exclusivity, and error mapping
 
 ## What Does Not Exist Yet
 
-- real prompt orchestration
-- tool execution loop
-- provider streaming integration through a live session engine
-- persistence and event fan-out coordinated by the engine itself
+- tool-use event execution loop (`ToolUse*` provider stream events are deferred)
+- full TS-parity prompt lifecycle (permissions, interactive questions, richer run-state/reporting)
+- broader CLI/TUI integration (`opencode prompt` command remains stubbed in binary runtime)
 
-## Why The Crate Still Matters
+## Runtime Behavior Snapshot
 
-Other crates can depend on the session abstraction now without waiting for the full implementation. `opencode-server` already uses `Arc<dyn Session>` in `AppState`.
+- `prompt` returns `SessionError::NotFound` if the session row does not exist.
+- Concurrent prompt for the same session returns `SessionError::Busy`.
+- `cancel` returns `SessionError::NoActiveRun` if no run is active.
+- Cancellation keeps already-persisted deltas and emits `SessionCancelled`.
+- Unsupported tool-use stream events currently return a runtime-internal error by design (deferred scope).
+
+## Workspace Integration
+
+- `opencode-server` exposes this crate through:
+  - `POST /api/v1/sessions/:sid/prompt`
+  - `POST /api/v1/sessions/:sid/cancel`
+- `opencode/src/lib.rs` wires `SessionEngine` into `AppState` when starting the server.
 
 ## Test
 
 ```sh
 cargo test -p opencode-session
+```
+
+For server + runtime integration validation:
+
+```sh
+cargo test -p opencode-server -p opencode --lib
 ```

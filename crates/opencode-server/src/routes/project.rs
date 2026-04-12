@@ -127,6 +127,9 @@ mod tests {
         async fn append_message(&self, _: MessageRow, _: Vec<PartRow>) -> Result<(), StorageError> {
             Ok(())
         }
+        async fn append_part(&self, _: PartRow) -> Result<(), StorageError> {
+            Ok(())
+        }
         async fn list_history(&self, _: SessionId) -> Result<Vec<MessageRow>, StorageError> {
             Ok(vec![])
         }

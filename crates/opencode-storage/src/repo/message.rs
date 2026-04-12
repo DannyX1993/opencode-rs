@@ -106,7 +106,7 @@ pub async fn list_parts(
     pool: &SqlitePool,
     message_id: MessageId,
 ) -> Result<Vec<PartRow>, StorageError> {
-    sqlx::query("SELECT * FROM part WHERE message_id = ? ORDER BY id")
+    sqlx::query("SELECT * FROM part WHERE message_id = ? ORDER BY time_created, id")
         .bind(message_id.to_string())
         .fetch_all(pool)
         .await

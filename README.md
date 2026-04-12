@@ -1,98 +1,109 @@
 # opencode-rs
 
-Rust workspace for the `opencode` agent runtime and supporting libraries.
+Rust workspace for the `opencode` runtime, server surface, and core libraries.
 
-## Status
+> Scope note: this README documents the Rust workspace in this directory only.
+> `opencode-ts/` is intentionally out of scope.
 
-`opencode-rs` builds a real CLI, a headless HTTP server, provider adapters, and a SQLite-backed storage layer. Several crates in the workspace are still stubs or placeholders, so this workspace is not yet a complete replacement for the TypeScript implementation.
+## Project Status
 
-This README documents only the Rust workspace in this directory. `opencode-ts/` is intentionally out of scope.
+The workspace is **partially production-shaped**: core crates are functional (CLI, storage, provider adapters, HTTP routes, and session runtime core), while some user-facing surfaces remain intentionally stubbed.
+
+Recent milestone reflected in this repo state: **`port-session-runtime-core` (in progress, substantial runtime landed)**.
+
+## Workspace Architecture (high level)
+
+```text
+opencode (binary)
+  └─ opencode-cli (command parsing/bootstrap)
+      ├─ opencode-server (HTTP routes)
+      │   ├─ opencode-session (prompt/cancel runtime core)
+      │   ├─ opencode-storage (SQLite repositories + migrations)
+      │   ├─ opencode-provider (LLM registry + adapters)
+      │   └─ opencode-bus (in-process event fan-out)
+      └─ opencode-tool (tool runtime + built-ins)
+
+opencode-core provides shared DTOs/config/errors/IDs across all crates.
+```
 
 ## Workspace Layout
 
-| Path | Type | Status | Purpose |
+| Path | Type | Status | Responsibility |
 | --- | --- | --- | --- |
-| `opencode/` | binary crate | active | Binary entrypoint and command dispatch |
-| `crates/opencode-cli/` | library crate | active | Clap CLI definitions, bootstrap, `tool` command wiring |
-| `crates/opencode-core/` | library crate | active | Shared config, DTOs, IDs, errors, tracing helpers |
+| `opencode/` | binary crate | active | Runtime entrypoint and command dispatch |
+| `crates/opencode-cli/` | library crate | active | Clap definitions, bootstrap, `tool` command wiring |
+| `crates/opencode-core/` | library crate | active | Shared config, DTOs, IDs, errors, tracing/context helpers |
 | `crates/opencode-provider/` | library crate | active | Provider trait, registry, OpenAI/Anthropic/Google adapters |
-| `crates/opencode-server/` | library crate | active | Axum router, health route, project/session/message API, provider harness |
-| `crates/opencode-storage/` | library crate | active | SQLite persistence, migrations, repositories, event store |
+| `crates/opencode-server/` | library crate | active | Axum router + project/session/message/prompt/cancel endpoints |
+| `crates/opencode-storage/` | library crate | active | SQLite persistence, migrations, repositories, event storage |
 | `crates/opencode-tool/` | library crate | active | Tool trait, registry, built-in read/list/glob/grep/write/bash tools |
 | `crates/opencode-bus/` | library crate | partial | Typed in-process broadcast bus with published event types |
-| `crates/opencode-session/` | library crate | stub | Session trait surface plus stub engine returning `NotFound` |
+| `crates/opencode-session/` | library crate | partial | Session runtime core: prompt lifecycle, run-state exclusivity, cancellation |
 | `crates/opencode-lsp/` | library crate | stub | Placeholder for future LSP integration |
 | `crates/opencode-mcp/` | library crate | stub | Placeholder for future MCP integration |
 | `crates/opencode-plugin/` | library crate | stub | Placeholder for future plugin host |
 | `crates/opencode-tui/` | library crate | stub | Placeholder for future terminal UI |
-| `docs/` | docs | active | Manual testing and workspace documentation |
-| `scripts/` | scripts | active | Helper scripts such as coverage reporting |
+| `docs/` | docs | active | Manual testing + architecture/runtime notes |
+| `scripts/` | scripts | active | Helper scripts (coverage, etc.) |
 
-## Version
+## Runtime/session work completed in this change stream
 
-Current Rust workspace version: `0.5.0`
+The `port-session-runtime-core` slice is now visible in code and tests:
 
-The workspace uses `version.workspace = true`, so crate package versions inherit from the root `Cargo.toml`.
+- `SessionEngine::prompt` validates session existence, resolves model/provider, persists user + assistant shell messages, and streams provider output.
+- Per-session run exclusivity is enforced via `RunState` (`Busy` on concurrent prompt for same session).
+- `cancel(session_id)` is wired and returns `NoActiveRun` when appropriate.
+- Provider `TextDelta` events are persisted incrementally as assistant parts.
+- Lifecycle events are published on `opencode-bus` (`SessionUpdated`, `PartAdded`, `SessionCompleted`, `SessionCancelled`, token usage).
+- HTTP endpoints `POST /api/v1/sessions/:sid/prompt` and `POST /api/v1/sessions/:sid/cancel` are wired through `opencode-server`.
 
-## What Works Today
+Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
 
-- `cargo run -p opencode -- version` prints the binary version.
-- `cargo run -p opencode -- config --show` prints merged configuration as JSON.
-- `cargo run -p opencode -- tool ...` invokes built-in tools directly.
-- `cargo run -p opencode -- server` starts an Axum server with `/health` plus project/session/message routes.
-- `POST /api/v1/provider/stream` exists only as a manual harness and is disabled unless `OPENCODE_MANUAL_HARNESS=1` is set.
-- SQLite storage is initialized from the current working directory using `opencode.db`.
+## What works today
 
-## What Is Still Incomplete
+- `cargo run -p opencode -- version`
+- `cargo run -p opencode -- config --show`
+- `cargo run -p opencode -- tool ...`
+- `cargo run -p opencode -- server --port 4141`
+- Session REST routes + prompt/cancel runtime endpoints via `opencode-server`
+- SQLite bootstrap from current working directory (`./opencode.db`)
 
-- `run` currently logs a stub message instead of launching a TUI.
-- `prompt <text>` currently logs a stub message instead of executing a full agent loop.
-- `config` without `--show` currently logs a stub message.
-- `opencode-session` does not yet implement the real session engine.
-- `opencode-lsp`, `opencode-mcp`, `opencode-plugin`, and `opencode-tui` are scaffolding crates with minimal code.
+## Deferred scope / known caveats
 
-## Quick Start
+- `run` command still logs a stub message (TUI not implemented).
+- `prompt <text>` CLI command is still a stub (server/session runtime is where prompt flow currently lives).
+- `config` without `--show` is still a stub.
+- Tool-use model events in session streaming are intentionally deferred and currently return runtime error for unsupported tool-use stream events.
+- `opencode-lsp`, `opencode-mcp`, `opencode-plugin`, and `opencode-tui` remain scaffolding crates.
+- `/api/v1/provider/stream` is a **manual harness**, not a stable public contract; it is disabled unless `OPENCODE_MANUAL_HARNESS=1`.
+
+## Quick start
 
 Prerequisites:
 
-- Rust `1.85` or newer
-- SQLite runtime support available for `sqlx` builds
-- Optional: `cargo-llvm-cov` for coverage reports
+- Rust `1.85`+
+- SQLite runtime support for `sqlx`
+- Optional: `cargo-llvm-cov`
 
-Build the Rust binary:
+Build:
 
 ```sh
 cargo build -p opencode
 ```
 
-Show the merged config for the current project:
-
-```sh
-cargo run -p opencode -- config --show
-```
-
-Run a built-in tool directly:
-
-```sh
-cargo run -p opencode -- tool read \
-  --args-json '{"filePath":"Cargo.toml","limit":10}'
-```
-
-Start the HTTP server on port `4141`:
+Run server:
 
 ```sh
 cargo run -p opencode -- server --port 4141
 ```
 
-Call the health route:
+Health check:
 
 ```sh
 curl http://127.0.0.1:4141/health
 ```
 
-## HTTP Surface
-
-Routes currently wired by `opencode-server`:
+## HTTP surface (currently wired)
 
 - `GET /health`
 - `GET /api/v1/projects`
@@ -104,54 +115,42 @@ Routes currently wired by `opencode-server`:
 - `PATCH /api/v1/sessions/:sid`
 - `GET /api/v1/sessions/:sid/messages`
 - `POST /api/v1/sessions/:sid/messages`
-- `POST /api/v1/provider/stream` only when `OPENCODE_MANUAL_HARNESS=1`
+- `POST /api/v1/sessions/:sid/prompt`
+- `POST /api/v1/sessions/:sid/cancel`
+- `POST /api/v1/provider/stream` (manual harness only)
 
-The provider stream route is a manual validation endpoint, not a stable public API.
+## Development and testing
 
-## Configuration
-
-`opencode-core::Config::load` merges configuration in this order:
-
-1. `~/.config/opencode/config.jsonc`
-2. `<project>/.opencode/config.jsonc`
-3. Environment variables such as `OPENCODE_MODEL`, `OPENCODE_LOG_LEVEL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, and `OPENCODE_SERVER_PORT`
-
-The binary also creates or reuses `opencode.db` in the current working directory when the server starts.
-
-## Testing
-
-Run the full Rust workspace tests:
+Workspace test pass:
 
 ```sh
 cargo test --workspace
 ```
 
-Run a narrower validation pass while editing docs or CLI behavior:
+Focused pass for runtime/server iteration:
 
 ```sh
-cargo test -p opencode -p opencode-cli -p opencode-server
+cargo test -p opencode-session -p opencode-server -p opencode --lib
 ```
 
-Generate coverage summaries:
+Coverage helper:
 
 ```sh
 ./scripts/coverage.sh
 ./scripts/coverage.sh --check
 ```
 
-Manual provider-harness testing steps live in `docs/MANUAL_TESTING.md`.
+Manual provider harness test plan: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md)
 
-## Relationship Between Crates
+## Versioning
 
-- `opencode` is the runnable binary and depends on the library crates.
-- `opencode-cli` parses commands and delegates `tool` execution to `opencode-tool`.
-- `opencode-server` exposes HTTP routes over `opencode-storage`, `opencode-provider`, `opencode-session`, and `opencode-bus`.
-- `opencode-storage` owns persistence and schema compatibility with the existing SQLite layout.
-- `opencode-session` is intended to orchestrate the agent loop, but today it is still a stub.
+- Workspace version is currently `0.6.0` (`[workspace.package]`).
+- Crates use `version.workspace = true`, so crate versions are kept in lockstep.
+- Until `1.0`, API and behavior can change between minor releases as runtime parity work continues.
 
-## More Documentation
+## More documentation
 
-- `crates/README.md` for the crate index
-- `docs/README.md` for available documentation
-- `opencode/README.md` for binary-specific notes
-- `scripts/README.md` for helper scripts
+- [`crates/README.md`](crates/README.md) — crate index and status
+- [`opencode/README.md`](opencode/README.md) — binary-specific runtime notes
+- [`docs/README.md`](docs/README.md) — docs index
+- [`scripts/README.md`](scripts/README.md) — helper scripts

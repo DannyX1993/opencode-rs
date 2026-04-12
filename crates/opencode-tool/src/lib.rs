@@ -9,10 +9,10 @@
 #![warn(missing_docs)]
 
 pub mod common;
+pub mod registry;
 pub mod tools;
 pub mod types;
-pub mod registry;
 
 pub use common::Ctx;
-pub use types::{Tool, ToolCall, ToolError, ToolPolicy, ToolResult};
 pub use registry::ToolRegistry;
+pub use types::{Tool, ToolCall, ToolError, ToolPolicy, ToolResult};

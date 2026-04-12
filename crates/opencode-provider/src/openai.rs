@@ -604,6 +604,7 @@ impl LanguageModel for OpenAiProvider {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use crate::types::ContentPart;

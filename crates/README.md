@@ -18,7 +18,7 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 | [`opencode-plugin`](opencode-plugin) | stub | Placeholder for future plugin hosting |
 | [`opencode-provider`](opencode-provider) | active | Provider registry and OpenAI/Anthropic/Google adapters |
 | [`opencode-server`](opencode-server) | active | Axum router and HTTP endpoints |
-| [`opencode-session`](opencode-session) | stub | Session trait plus stub engine |
+| [`opencode-session`](opencode-session) | partial | Session runtime core (`prompt`, `cancel`, stream persistence, run-state) |
 | [`opencode-storage`](opencode-storage) | active | SQLite persistence and repositories |
 | [`opencode-tool`](opencode-tool) | active | Tool runtime and built-in file/shell tools |
 | [`opencode-tui`](opencode-tui) | stub | Placeholder for future terminal UI |
@@ -28,6 +28,10 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 - `active` means the crate has real code used by the current binary or tests.
 - `partial` means part of the intended surface exists, but not all planned behavior is implemented yet.
 - `stub` means the crate mostly exists to reserve the package boundary and public API direction.
+
+Current notable `partial` crate details:
+
+- `opencode-session` now includes runtime core orchestration and cancellation semantics, but tool-use event execution and broader runtime parity are still deferred.
 
 ## Build And Test
 

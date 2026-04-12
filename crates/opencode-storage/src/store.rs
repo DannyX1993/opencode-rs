@@ -47,6 +47,8 @@ pub trait Storage: Send + Sync {
         msg: MessageRow,
         parts: Vec<PartRow>,
     ) -> Result<(), StorageError>;
+    /// Append a single part row to an existing message.
+    async fn append_part(&self, part: PartRow) -> Result<(), StorageError>;
     /// Return all messages for a session, ordered by creation time.
     async fn list_history(&self, session_id: SessionId) -> Result<Vec<MessageRow>, StorageError>;
     /// Return all messages for a session, each bundled with its parts.
@@ -144,6 +146,9 @@ impl Storage for StorageImpl {
             message::append_part(&self.pool, part).await?;
         }
         Ok(())
+    }
+    async fn append_part(&self, part: PartRow) -> Result<(), StorageError> {
+        message::append_part(&self.pool, &part).await
     }
     async fn list_history(&self, session_id: SessionId) -> Result<Vec<MessageRow>, StorageError> {
         message::list(&self.pool, session_id).await

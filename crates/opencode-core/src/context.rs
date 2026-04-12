@@ -6,8 +6,8 @@
 //! - [`SessionCtx`] — task-local session context so that nested tasks can
 //!   read the active session id without threading it through every function.
 
-use std::pin::Pin;
 use futures::Stream;
+use std::pin::Pin;
 pub use tokio_util::sync::CancellationToken;
 
 /// Convenience alias for a heap-allocated async stream.

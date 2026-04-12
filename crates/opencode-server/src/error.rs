@@ -1,7 +1,7 @@
 //! Server-layer error types and `IntoResponse` mapping.
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
-use opencode_core::error::StorageError;
+use opencode_core::error::{SessionError, StorageError};
 use serde_json::json;
 
 /// HTTP error response wrapper.
@@ -35,6 +35,14 @@ impl HttpError {
             msg: msg.into(),
         }
     }
+
+    /// 409 Conflict.
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            msg: msg.into(),
+        }
+    }
 }
 
 impl IntoResponse for HttpError {
@@ -56,6 +64,26 @@ impl From<StorageError> for HttpError {
             StorageError::Db(msg) => Self::internal(msg),
             StorageError::Serde(msg) => Self::internal(msg),
             // `#[non_exhaustive]` guard — any future variants become 500
+            _ => Self::internal(err.to_string()),
+        }
+    }
+}
+
+/// Map session-layer errors to HTTP errors.
+///
+/// - [`SessionError::NotFound`] -> 404
+/// - [`SessionError::Busy`] / [`SessionError::NoActiveRun`] -> 409
+/// - provider/runtime failures -> 500
+impl From<SessionError> for HttpError {
+    fn from(err: SessionError) -> Self {
+        match err {
+            SessionError::NotFound(msg) => Self::not_found(msg),
+            SessionError::Busy(msg) | SessionError::NoActiveRun(msg) => Self::conflict(msg),
+            SessionError::Provider(msg) | SessionError::RuntimeInternal(msg) => Self::internal(msg),
+            SessionError::Cancelled => Self::conflict("session cancelled"),
+            SessionError::ContextOverflow { id } => {
+                Self::internal(format!("context overflow in session {id}"))
+            }
             _ => Self::internal(err.to_string()),
         }
     }
@@ -86,6 +114,13 @@ mod tests {
         let e = HttpError::internal("db error");
         assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(e.msg.contains("db error"));
+    }
+
+    #[test]
+    fn conflict_status() {
+        let e = HttpError::conflict("session is busy");
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(e.msg.contains("session is busy"));
     }
 
     #[test]
@@ -138,5 +173,40 @@ mod tests {
         let http_err = HttpError::from(storage_err);
         assert_eq!(http_err.status, StatusCode::NOT_FOUND);
         assert!(http_err.msg.contains("sess-xyz-999"));
+    }
+
+    #[test]
+    fn session_not_found_maps_to_404() {
+        let http_err = HttpError::from(SessionError::NotFound("sess-404".into()));
+        assert_eq!(http_err.status, StatusCode::NOT_FOUND);
+        assert!(http_err.msg.contains("sess-404"));
+    }
+
+    #[test]
+    fn session_busy_maps_to_409() {
+        let http_err = HttpError::from(SessionError::Busy("sess-busy".into()));
+        assert_eq!(http_err.status, StatusCode::CONFLICT);
+        assert!(http_err.msg.contains("sess-busy"));
+    }
+
+    #[test]
+    fn session_provider_maps_to_500() {
+        let http_err = HttpError::from(SessionError::Provider("provider timeout".into()));
+        assert_eq!(http_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(http_err.msg.contains("provider timeout"));
+    }
+
+    #[test]
+    fn session_internal_maps_to_500() {
+        let http_err = HttpError::from(SessionError::RuntimeInternal("panic in runtime".into()));
+        assert_eq!(http_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(http_err.msg.contains("panic in runtime"));
+    }
+
+    #[test]
+    fn session_no_active_run_maps_to_409() {
+        let http_err = HttpError::from(SessionError::NoActiveRun("sess-idle".into()));
+        assert_eq!(http_err.status, StatusCode::CONFLICT);
+        assert!(http_err.msg.contains("sess-idle"));
     }
 }

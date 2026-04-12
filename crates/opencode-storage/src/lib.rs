@@ -13,11 +13,11 @@
 
 #![warn(missing_docs)]
 
-pub mod pool;
-pub mod store;
 pub mod event_store;
+pub mod pool;
 pub mod repo;
+pub mod store;
 
-pub use store::{Storage, StorageImpl};
 pub use event_store::SyncEventStore;
 pub use pool::connect;
+pub use store::{Storage, StorageImpl};

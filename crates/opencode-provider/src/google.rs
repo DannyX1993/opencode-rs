@@ -530,6 +530,7 @@ impl LanguageModel for GoogleProvider {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use futures::StreamExt;

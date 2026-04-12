@@ -60,8 +60,10 @@ mod tests {
     #[test]
     fn init_json_mode_does_not_panic() {
         // Exercise the `log_json = true` branch.
-        let mut cfg = Config::default();
-        cfg.log_json = true;
+        let cfg = Config {
+            log_json: true,
+            ..Default::default()
+        };
         init(&cfg);
     }
 
@@ -83,8 +85,10 @@ mod tests {
     /// Confirm `init()` succeeds in JSON mode with stderr routing.
     #[test]
     fn init_routes_json_to_stderr_no_panic() {
-        let mut cfg = Config::default();
-        cfg.log_json = true;
+        let cfg = Config {
+            log_json: true,
+            ..Default::default()
+        };
         init(&cfg); // exercises json branch with `.with_writer(std::io::stderr)`
         tracing::info!("tracing-json-stderr-routing-test");
     }

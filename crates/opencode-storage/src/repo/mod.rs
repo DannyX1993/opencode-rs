@@ -2,9 +2,9 @@
 //!
 //! Phase 0 exposes the module hierarchy so imports compile.
 
+pub mod account;
+pub mod message;
+pub mod permission;
 pub mod project;
 pub mod session;
-pub mod message;
-pub mod account;
-pub mod permission;
 pub mod todo;

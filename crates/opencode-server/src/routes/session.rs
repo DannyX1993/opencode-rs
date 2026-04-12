@@ -8,8 +8,9 @@ use axum::{
 };
 use opencode_core::{
     dto::{MessageWithParts, PartRow, SessionRow},
-    id::{ProjectId, SessionId, WorkspaceId},
+    id::{MessageId, ProjectId, SessionId, WorkspaceId},
 };
+use opencode_session::types::{SessionHandle, SessionPrompt};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::HttpError, state::AppState};
@@ -241,6 +242,34 @@ impl SessionPatchDto {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SessionPromptDto {
+    text: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    plan_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionHandleDto {
+    session_id: SessionId,
+    #[serde(default)]
+    assistant_message_id: Option<MessageId>,
+    #[serde(default)]
+    resolved_model: Option<String>,
+}
+
+impl From<SessionHandle> for SessionHandleDto {
+    fn from(handle: SessionHandle) -> Self {
+        Self {
+            session_id: handle.session_id,
+            assistant_message_id: handle.assistant_message_id,
+            resolved_model: handle.resolved_model,
+        }
+    }
+}
+
 /// `POST /api/v1/projects/:pid/sessions` — create a new session.
 pub(crate) async fn create(
     State(s): State<AppState>,
@@ -334,6 +363,38 @@ pub(crate) async fn append_message(
     }
 }
 
+/// `POST /api/v1/sessions/:sid/prompt` — start a prompt turn for a session.
+pub(crate) async fn prompt(
+    State(s): State<AppState>,
+    Path(sid): Path<SessionId>,
+    Json(payload): Json<SessionPromptDto>,
+) -> impl IntoResponse {
+    match s
+        .session
+        .prompt(SessionPrompt {
+            session_id: sid,
+            text: payload.text,
+            model: payload.model,
+            plan_mode: payload.plan_mode,
+        })
+        .await
+    {
+        Ok(handle) => (StatusCode::ACCEPTED, Json(SessionHandleDto::from(handle))).into_response(),
+        Err(err) => HttpError::from(err).into_response(),
+    }
+}
+
+/// `POST /api/v1/sessions/:sid/cancel` — cancel the active prompt turn for a session.
+pub(crate) async fn cancel(
+    State(s): State<AppState>,
+    Path(sid): Path<SessionId>,
+) -> impl IntoResponse {
+    match s.session.cancel(sid).await {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(err) => HttpError::from(err).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +479,13 @@ mod tests {
                 .push(MessageWithParts { info: msg, parts });
             Ok(())
         }
+        async fn append_part(&self, part: PartRow) -> Result<(), StorageError> {
+            let mut messages = self.messages.lock().unwrap();
+            if let Some(message) = messages.iter_mut().find(|m| m.info.id == part.message_id) {
+                message.parts.push(part);
+            }
+            Ok(())
+        }
         async fn list_history(&self, _: SessionId) -> Result<Vec<MessageRow>, StorageError> {
             Ok(vec![])
         }
@@ -465,24 +533,69 @@ mod tests {
         }
     }
 
-    struct StubSession;
+    #[derive(Debug, Clone, Copy)]
+    enum StubSessionMode {
+        NotFound,
+        Success,
+        Busy,
+        NoActiveRun,
+    }
+
+    struct StubSession {
+        mode: StubSessionMode,
+        prompts: Arc<Mutex<Vec<SessionPrompt>>>,
+        cancels: Arc<Mutex<Vec<SessionId>>>,
+    }
+
+    impl StubSession {
+        fn new(mode: StubSessionMode) -> Self {
+            Self {
+                mode,
+                prompts: Arc::new(Mutex::new(Vec::new())),
+                cancels: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
 
     #[async_trait]
     impl Session for StubSession {
-        async fn prompt(&self, _: SessionPrompt) -> Result<SessionHandle, SessionError> {
-            Err(SessionError::NotFound("stub".into()))
+        async fn prompt(&self, req: SessionPrompt) -> Result<SessionHandle, SessionError> {
+            self.prompts.lock().unwrap().push(req.clone());
+            match self.mode {
+                StubSessionMode::NotFound => Err(SessionError::NotFound("stub".into())),
+                StubSessionMode::Busy => Err(SessionError::Busy(req.session_id.to_string())),
+                StubSessionMode::Success => Ok(SessionHandle::new(req.session_id)
+                    .with_assistant_message_id(MessageId::new())
+                    .with_resolved_model(req.model.unwrap_or_else(|| "stub/model".into()))),
+                StubSessionMode::NoActiveRun => {
+                    Err(SessionError::NoActiveRun(req.session_id.to_string()))
+                }
+            }
         }
-        async fn cancel(&self, _: SessionId) -> Result<(), SessionError> {
-            Err(SessionError::NotFound("stub".into()))
+
+        async fn cancel(&self, session_id: SessionId) -> Result<(), SessionError> {
+            self.cancels.lock().unwrap().push(session_id);
+            match self.mode {
+                StubSessionMode::Success => Ok(()),
+                StubSessionMode::NoActiveRun => {
+                    Err(SessionError::NoActiveRun(session_id.to_string()))
+                }
+                StubSessionMode::NotFound => Err(SessionError::NotFound("stub".into())),
+                StubSessionMode::Busy => Err(SessionError::Busy(session_id.to_string())),
+            }
         }
     }
 
     fn app(stub: Stub) -> Router {
+        app_with_session(stub, Arc::new(StubSession::new(StubSessionMode::NotFound)))
+    }
+
+    fn app_with_session(stub: Stub, session: Arc<dyn Session>) -> Router {
         let state = crate::state::AppState {
             config: Arc::new(Config::default()),
             bus: Arc::new(BroadcastBus::new(64)),
             storage: Arc::new(stub),
-            session: Arc::new(StubSession),
+            session,
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
             harness: false,
         };
@@ -491,11 +604,15 @@ mod tests {
 
     /// Build router while keeping a handle to the stub for post-request state inspection.
     fn app_arc(stub: Arc<Stub>) -> Router {
+        app_arc_with_session(stub, Arc::new(StubSession::new(StubSessionMode::NotFound)))
+    }
+
+    fn app_arc_with_session(stub: Arc<Stub>, session: Arc<dyn Session>) -> Router {
         let state = crate::state::AppState {
             config: Arc::new(Config::default()),
             bus: Arc::new(BroadcastBus::new(64)),
             storage: stub,
-            session: Arc::new(StubSession),
+            session,
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
             harness: false,
         };
@@ -1061,5 +1178,96 @@ mod tests {
             msgs[0].parts.iter().all(|p| p.session_id == sid),
             "parts must carry overridden session_id"
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_route_returns_accepted_with_handle_metadata() {
+        let pid = ProjectId::new();
+        let sid = SessionId::new();
+        let stub = Stub::default();
+        stub.create_session(sess(sid, pid)).await.unwrap();
+        let session = Arc::new(StubSession::new(StubSessionMode::Success));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/sessions/{sid}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "text": "hello from route",
+                    "model": "stub/model",
+                    "plan_mode": true
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app_with_session(stub, session).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["session_id"], sid.to_string());
+        assert_eq!(json["resolved_model"], "stub/model");
+        assert!(json["assistant_message_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn prompt_route_maps_busy_error_to_conflict() {
+        let sid = SessionId::new();
+        let session = Arc::new(StubSession::new(StubSessionMode::Busy));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/sessions/{sid}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({"text": "retry"})).unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app_with_session(Stub::default(), session)
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn cancel_route_returns_accepted_and_records_session_id() {
+        let sid = SessionId::new();
+        let session = Arc::new(StubSession::new(StubSessionMode::Success));
+        let cancels = Arc::clone(&session.cancels);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/sessions/{sid}/cancel"))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app_with_session(Stub::default(), session)
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let calls = cancels.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], sid);
+    }
+
+    #[tokio::test]
+    async fn cancel_route_maps_no_active_run_to_conflict() {
+        let sid = SessionId::new();
+        let session = Arc::new(StubSession::new(StubSessionMode::NoActiveRun));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/sessions/{sid}/cancel"))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app_with_session(Stub::default(), session)
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }

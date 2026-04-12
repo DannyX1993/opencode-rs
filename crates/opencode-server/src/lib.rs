@@ -1,10 +1,15 @@
 //! # opencode-server
 //!
-//! Axum HTTP server providing the OpenAPI 3.1.1-compatible REST API,
-//! SSE event stream, and WebSocket upgrade used by all opencode clients.
+//! Axum HTTP server for the Rust workspace.
 //!
-//! Phase 0 wires up the router skeleton and health endpoint.
-//! Phase 5 adds project CRUD routes under `/api/v1`.
+//! Currently includes:
+//! - liveness route (`/health`)
+//! - project/session/message REST routes under `/api/v1`
+//! - runtime session entrypoints (`/api/v1/sessions/:sid/prompt|cancel`)
+//! - env-gated manual provider stream harness (`/api/v1/provider/stream`)
+//!
+//! API and behavior are intentionally evolving while runtime parity work is in
+//! progress.
 
 #![warn(missing_docs)]
 

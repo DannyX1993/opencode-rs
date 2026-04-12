@@ -24,6 +24,16 @@ This crate is the runnable entrypoint for the workspace. It keeps `src/main.rs` 
 - Starting the server creates or opens `./opencode.db`.
 - `OPENCODE_MANUAL_HARNESS=1` enables the manual provider streaming route.
 - Standard providers are registered for the harness only when that environment variable is set.
+- Server startup wires `SessionEngine` from `opencode-session`, so session prompt/cancel APIs are runtime-backed.
+
+## Session Runtime Surface
+
+Even though the CLI `prompt` command is still stubbed, server mode now exposes runtime-core endpoints:
+
+- `POST /api/v1/sessions/:sid/prompt`
+- `POST /api/v1/sessions/:sid/cancel`
+
+These routes are served by `opencode-server` and call into `opencode-session::engine::SessionEngine`.
 
 ## Run
 

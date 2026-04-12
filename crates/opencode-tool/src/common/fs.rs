@@ -168,9 +168,7 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         // 40% non-printable bytes (control chars 0x01)
         let mut data: Vec<u8> = b"aaaaaaaaaa".to_vec();
-        for _ in 0..7 {
-            data.push(0x01); // non-printable
-        }
+        data.extend(std::iter::repeat_n(0x01, 7)); // non-printable
         f.write_all(&data).unwrap();
         assert!(is_binary(f.path()).unwrap());
     }

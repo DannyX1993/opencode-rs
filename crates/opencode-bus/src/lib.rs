@@ -9,8 +9,8 @@
 
 #![warn(missing_docs)]
 
-mod event;
 mod bus;
+mod event;
 
+pub use bus::{BroadcastBus, BusError, EventBus};
 pub use event::{BusEvent, EventKind};
-pub use bus::{BroadcastBus, EventBus, BusError};

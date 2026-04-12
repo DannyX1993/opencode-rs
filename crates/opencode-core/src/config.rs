@@ -230,6 +230,7 @@ fn dirs_home() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use std::io::Write;

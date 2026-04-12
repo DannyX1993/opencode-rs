@@ -74,11 +74,11 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
     let cfg = Config::load(cwd).await?;
     let db = cwd.join("opencode.db");
     let pool = connect(&db).await?;
-    let storage = StorageImpl::new(pool);
-    let bus = BroadcastBus::new(64);
+    let storage: Arc<dyn opencode_storage::Storage> = Arc::new(StorageImpl::new(pool));
+    let bus = Arc::new(BroadcastBus::new(64));
     let harness = std::env::var("OPENCODE_MANUAL_HARNESS").as_deref() == Ok("1");
 
-    let registry = ModelRegistry::new();
+    let registry = Arc::new(ModelRegistry::new());
     if harness {
         // Register standard providers from env keys.
         let openai_auth = OpenAiProvider::default_auth(None);
@@ -98,12 +98,20 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
             .await;
     }
 
+    let default_model = cfg.model.clone();
+    let session = Arc::new(SessionEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&bus),
+        Arc::clone(&registry),
+        default_model,
+    ));
+
     let state = AppState {
         config: Arc::new(cfg),
-        bus: Arc::new(bus),
-        storage: Arc::new(storage),
-        session: Arc::new(SessionEngine),
-        registry: Arc::new(registry),
+        bus,
+        storage,
+        session,
+        registry,
         harness,
     };
 
@@ -115,6 +123,7 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use clap::Parser;
@@ -236,6 +245,44 @@ mod tests {
         unsafe {
             std::env::remove_var("OPENCODE_MANUAL_HARNESS");
         }
+    }
+
+    #[tokio::test]
+    async fn start_server_uses_runtime_session_for_prompt_route() {
+        use reqwest::StatusCode;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let handle = tokio::spawn(async move {
+            start_server(&path, port).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let sid = opencode_core::id::SessionId::new();
+        let resp = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{port}/api/v1/sessions/{sid}/prompt"
+            ))
+            .json(&serde_json::json!({"text": "hello runtime"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let err = body["error"].as_str().unwrap();
+        assert!(
+            err.contains(&sid.to_string()),
+            "expected runtime not-found to include session id, got: {err}"
+        );
+
+        handle.abort();
     }
 
     // ── B.5 REFACTOR: Tool dispatch integration ───────────────────────────────

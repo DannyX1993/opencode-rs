@@ -72,7 +72,10 @@ impl Default for BroadcastBus {
 impl EventBus for BroadcastBus {
     fn publish(&self, ev: BusEvent) -> Result<(), BusError> {
         // `send` errors only when there are 0 receivers — treat as no-op.
-        self.tx.send(ev).map(|_| ()).map_err(|_| BusError::NoReceivers)
+        self.tx
+            .send(ev)
+            .map(|_| ())
+            .map_err(|_| BusError::NoReceivers)
     }
 
     fn subscribe(&self) -> broadcast::Receiver<BusEvent> {
@@ -135,7 +138,7 @@ mod tests {
             bus.publish(BusEvent::ConfigChanged).unwrap();
         }
         let mut count = 0usize;
-        while let Ok(_) = rx.try_recv() {
+        while rx.try_recv().is_ok() {
             count += 1;
         }
         assert_eq!(count, 100);

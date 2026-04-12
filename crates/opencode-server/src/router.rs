@@ -13,10 +13,10 @@ use opencode_core::error::ServerError;
 
 /// Build the axum [`Router`] with all route groups registered.
 ///
-/// `/health` is the liveness probe (Phase 0, unchanged).
-/// `/api/v1/projects` CRUD routes are wired in Phase 5.
-/// `/api/v1/projects/:pid/sessions` and `/api/v1/sessions/:sid` routes are wired in Phase 6.
-/// `/api/v1/provider/stream` is the manual harness (Phase 2, gated by env var).
+/// `/health` is the liveness probe.
+/// `/api/v1/projects` and session/message routes expose storage-backed REST APIs.
+/// `/api/v1/sessions/:sid/prompt|cancel` call into the session runtime.
+/// `/api/v1/provider/stream` is a manual harness route gated by env config.
 pub fn build(state: AppState) -> Router {
     let api = Router::new()
         // Project routes (Phase 5)
@@ -35,6 +35,8 @@ pub fn build(state: AppState) -> Router {
             "/sessions/{sid}/messages",
             get(session::list_messages).post(session::append_message),
         )
+        .route("/sessions/{sid}/prompt", post(session::prompt))
+        .route("/sessions/{sid}/cancel", post(session::cancel))
         // Manual provider harness (Phase 2 — env-gated)
         .route("/provider/stream", post(provider::stream));
 
@@ -119,6 +121,9 @@ mod tests {
             Ok(())
         }
         async fn append_message(&self, _: MessageRow, _: Vec<PartRow>) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn append_part(&self, _: PartRow) -> Result<(), StorageError> {
             Ok(())
         }
         async fn list_history(&self, _: SessionId) -> Result<Vec<MessageRow>, StorageError> {

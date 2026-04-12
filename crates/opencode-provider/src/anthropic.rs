@@ -418,7 +418,7 @@ mod tests {
         };
         let events = map_event(&ev);
         // Usage + Done
-        assert!(events.len() >= 1);
+        assert!(!events.is_empty());
         assert!(
             events
                 .iter()
