@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use opencode_bus::{BroadcastBus, BusEvent, EventBus};
 use opencode_core::{
     context::SessionCtx,
-    dto::{MessageRow, PartRow},
+    dto::{MessageRow, MessageWithParts, PartRow},
     error::SessionError,
     id::{MessageId, PartId, SessionId},
 };
@@ -13,7 +13,8 @@ use opencode_provider::{
     types::{ContentPart, ModelMessage, ModelRequest},
 };
 use opencode_storage::Storage;
-use std::{sync::Arc, time::SystemTime};
+use opencode_tool::{Ctx, ToolCall, ToolRegistry, ToolResult};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
 
 use crate::run_state::RunState;
 use crate::runtime;
@@ -72,15 +73,23 @@ impl SessionEngine {
 #[async_trait]
 impl Session for SessionEngine {
     async fn prompt(&self, req: SessionPrompt) -> Result<SessionHandle, SessionError> {
-        if self
+        let session_row = self
             .storage
             .get_session(req.session_id)
             .await
             .map_err(|err| SessionError::RuntimeInternal(err.to_string()))?
-            .is_none()
-        {
-            return Err(SessionError::NotFound(req.session_id.to_string()));
-        }
+            .ok_or_else(|| SessionError::NotFound(req.session_id.to_string()))?;
+        let project_row = self
+            .storage
+            .get_project(session_row.project_id)
+            .await
+            .map_err(|err| SessionError::RuntimeInternal(err.to_string()))?
+            .ok_or_else(|| {
+                SessionError::RuntimeInternal(format!(
+                    "project not found for session {}",
+                    req.session_id
+                ))
+            })?;
 
         let run = self.runs.acquire(req.session_id).await?;
 
@@ -101,6 +110,15 @@ impl Session for SessionEngine {
             let provider = self.registry.get(provider_id).await.ok_or_else(|| {
                 SessionError::Provider(format!("provider not registered: {provider_id}"))
             })?;
+
+            let supports_runtime_tools = provider_supports_runtime_tools(provider_id);
+            let tool_registry = if supports_runtime_tools {
+                let mut tool_ctx = Ctx::default_for(PathBuf::from(&project_row.worktree));
+                tool_ctx.cwd = PathBuf::from(&session_row.directory);
+                Some(ToolRegistry::with_builtins(tool_ctx))
+            } else {
+                None
+            };
 
             let now = now_millis();
 
@@ -151,36 +169,105 @@ impl Session for SessionEngine {
                 message_id: assistant_message_id,
             });
 
-            let stream = provider
-                .stream(ModelRequest {
+            loop {
+                let history = self
+                    .storage
+                    .list_history_with_parts(req.session_id)
+                    .await
+                    .map_err(|err| SessionError::RuntimeInternal(err.to_string()))?;
+
+                let tool_defs = if let Some(registry) = &tool_registry {
+                    let defs = registry.definitions().await;
+                    defs.into_iter()
+                        .map(|d| {
+                            (
+                                d.name.clone(),
+                                serde_json::json!({
+                                    "name": d.name,
+                                    "description": d.description,
+                                    "input_schema": d.input_schema,
+                                }),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                } else {
+                    BTreeMap::new()
+                };
+
+                let request = ModelRequest {
                     model: provider_model.to_string(),
                     system: Vec::new(),
-                    messages: vec![ModelMessage {
-                        role: "user".into(),
-                        content: vec![ContentPart::Text {
-                            text: req.text.clone(),
-                        }],
-                    }],
-                    tools: Default::default(),
+                    messages: history_to_model_messages(&history),
+                    tools: tool_defs,
                     max_tokens: None,
                     temperature: None,
-                })
-                .await
-                .map_err(|err| SessionError::Provider(err.to_string()))?;
+                };
 
-            runtime::run_prompt_stream(
-                runtime::RuntimeStreamContext {
+                let stream = provider
+                    .stream(request)
+                    .await
+                    .map_err(|err| SessionError::Provider(err.to_string()))?;
+
+                let runtime_ctx = runtime::RuntimeStreamContext {
                     session_id: req.session_id,
                     assistant_message_id,
                     storage: Arc::clone(&self.storage),
                     bus: Arc::clone(&self.bus),
                     provider_id: provider_id.to_string(),
                     model_id: provider_model.to_string(),
-                },
-                stream,
-                run.cancellation_token(),
-            )
-            .await?;
+                };
+
+                match runtime::run_prompt_stream(runtime_ctx, stream, run.cancellation_token()).await?
+                {
+                    runtime::PromptTurnOutcome::Done => break,
+                    runtime::PromptTurnOutcome::ToolCall { id, name, input } => {
+                        if !supports_runtime_tools {
+                            return Err(SessionError::Provider(format!(
+                                "provider '{provider_id}' does not support runtime tool execution in this MVP"
+                            )));
+                        }
+
+                        let _ = self.bus.publish(BusEvent::ToolStarted {
+                            session_id: req.session_id,
+                            tool: name.clone(),
+                            call_id: id.clone(),
+                        });
+
+                        let result = if let Some(registry) = &tool_registry {
+                            match registry
+                                .invoke(ToolCall {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    args: input,
+                                })
+                                .await
+                            {
+                                Ok(result) => result,
+                                Err(err) => ToolResult::err(id.clone(), err.to_string()),
+                            }
+                        } else {
+                            ToolResult::err(id.clone(), "tool registry unavailable".into())
+                        };
+
+                        let persist_ctx = runtime::RuntimeStreamContext {
+                            session_id: req.session_id,
+                            assistant_message_id,
+                            storage: Arc::clone(&self.storage),
+                            bus: Arc::clone(&self.bus),
+                            provider_id: provider_id.to_string(),
+                            model_id: provider_model.to_string(),
+                        };
+                        runtime::persist_tool_result(&persist_ctx, &id, &result).await?;
+
+                        let _ = self.bus.publish(BusEvent::ToolFinished {
+                            session_id: req.session_id,
+                            tool: name,
+                            call_id: id,
+                            ok: !result.is_err,
+                        });
+                    }
+                }
+            }
 
             Ok(SessionHandle::new(req.session_id)
                 .with_assistant_message_id(assistant_message_id)
@@ -204,20 +291,103 @@ fn now_millis() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+fn provider_supports_runtime_tools(provider_id: &str) -> bool {
+    // Bounded MVP gate: only providers whose adapters can round-trip persisted tool history
+    // without lossy replay are allowed into the runtime tool loop.
+    matches!(provider_id, "anthropic" | "google")
+}
+
+fn history_to_model_messages(history: &[MessageWithParts]) -> Vec<ModelMessage> {
+    // Replay is storage-first by design. Each provider pass is rebuilt from persisted history
+    // so cancellation/retry behavior never depends on transient in-memory tool state.
+    let mut out = Vec::new();
+    for message in history {
+        let role = message
+            .info
+            .data
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user")
+            .to_string();
+
+        let mut content = Vec::new();
+        for part in &message.parts {
+            let Some(part_type) = part.data.get("type").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            match part_type {
+                "text" => {
+                    if let Some(text) = part.data.get("text").and_then(|v| v.as_str()) {
+                        content.push(ContentPart::Text {
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                "tool_use" => {
+                    let Some(id) = part.data.get("id").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let Some(name) = part.data.get("name").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let input = part
+                        .data
+                        .get("input")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let thought_signature = part
+                        .data
+                        .get("thought_signature")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                    content.push(ContentPart::ToolUse {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        input,
+                        thought_signature,
+                    });
+                }
+                "tool_result" => {
+                    let Some(tool_use_id) = part.data.get("tool_use_id").and_then(|v| v.as_str())
+                    else {
+                        continue;
+                    };
+                    let content_text = part
+                        .data
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    content.push(ContentPart::ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: content_text,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        if !content.is_empty() {
+            out.push(ModelMessage { role, content });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures::stream;
-    use opencode_bus::BroadcastBus;
+    use opencode_bus::{BroadcastBus, BusEvent, EventBus};
     use opencode_core::{
         context::BoxStream,
-        dto::{MessageRow, PartRow, ProjectRow, SessionRow},
+        dto::{MessageRow, MessageWithParts, PartRow, ProjectRow, SessionRow},
         id::{MessageId, PartId, ProjectId, SessionId},
     };
     use opencode_provider::{
         LanguageModel, ModelEvent, ModelInfo, ModelRegistry, ModelRequest, ProviderError,
-        types::{ContentPart, ModelMessage},
+        types::ContentPart,
     };
     use opencode_storage::{Storage, StorageImpl, connect};
     use std::sync::Arc;
@@ -232,6 +402,19 @@ mod tests {
     struct StubProvider {
         mode: StubMode,
         started: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    struct ToolLoopProvider {
+        calls: std::sync::Mutex<usize>,
+    }
+
+    struct ToolLoopFailureProvider {
+        calls: std::sync::Mutex<usize>,
+    }
+
+    struct ToolLoopSecondPassPendingProvider {
+        calls: std::sync::Mutex<usize>,
+        second_pass_started: Arc<tokio::sync::Notify>,
     }
 
     impl StubProvider {
@@ -264,6 +447,31 @@ mod tests {
         }
     }
 
+    impl ToolLoopProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    impl ToolLoopFailureProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    impl ToolLoopSecondPassPendingProvider {
+        fn new(second_pass_started: Arc<tokio::sync::Notify>) -> Self {
+            Self {
+                calls: std::sync::Mutex::new(0),
+                second_pass_started,
+            }
+        }
+    }
+
     #[async_trait]
     impl LanguageModel for StubProvider {
         fn provider(&self) -> &'static str {
@@ -288,13 +496,14 @@ mod tests {
                 started.notify_waiters();
             }
             assert_eq!(req.model, "test-model");
-            assert_eq!(req.messages.len(), 1);
-            let first: &ModelMessage = &req.messages[0];
-            assert_eq!(first.role, "user");
-            assert!(matches!(
-                first.content.first(),
-                Some(ContentPart::Text { .. })
-            ));
+            assert!(!req.messages.is_empty());
+            assert!(req.messages.iter().any(|msg| {
+                msg.role == "user"
+                    && msg
+                        .content
+                        .iter()
+                        .any(|part| matches!(part, ContentPart::Text { .. }))
+            }));
 
             let stream: BoxStream<Result<ModelEvent, ProviderError>> = match self.mode {
                 StubMode::Done => Box::pin(stream::iter([Ok(ModelEvent::Done {
@@ -314,6 +523,189 @@ mod tests {
                 StubMode::Pending => Box::pin(stream::pending()),
             };
             Ok(stream)
+        }
+    }
+
+    #[async_trait]
+    impl LanguageModel for ToolLoopProvider {
+        fn provider(&self) -> &'static str {
+            "anthropic"
+        }
+
+        async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![ModelInfo {
+                id: "anthropic/test-model".into(),
+                name: "Test".into(),
+                context_window: 8_000,
+                max_output: 1_000,
+                vision: false,
+            }])
+        }
+
+        async fn stream(
+            &self,
+            req: ModelRequest,
+        ) -> Result<BoxStream<Result<ModelEvent, ProviderError>>, ProviderError> {
+            let mut guard = self.calls.lock().unwrap();
+            let call = *guard;
+            *guard += 1;
+            drop(guard);
+
+            if call == 0 {
+                assert!(
+                    !req.tools.is_empty(),
+                    "expected tool declarations on first pass"
+                );
+                return Ok(Box::pin(stream::iter([
+                    Ok(ModelEvent::ToolUseStart {
+                        id: "call_1".into(),
+                        name: "bash".into(),
+                        thought_signature: None,
+                    }),
+                    Ok(ModelEvent::ToolUseInputDelta {
+                        id: "call_1".into(),
+                        delta: "{\"command\":\"echo hi\",\"description\":\"Echo\"}".into(),
+                    }),
+                    Ok(ModelEvent::ToolUseEnd {
+                        id: "call_1".into(),
+                    }),
+                ])));
+            }
+
+            assert!(
+                req.messages.iter().any(|m| {
+                    m.content
+                        .iter()
+                        .any(|p| matches!(p, ContentPart::ToolResult { .. }))
+                }),
+                "expected replayed tool_result on second pass"
+            );
+
+            Ok(Box::pin(stream::iter([
+                Ok(ModelEvent::TextDelta {
+                    delta: "done".into(),
+                }),
+                Ok(ModelEvent::Done {
+                    reason: "stop".into(),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl LanguageModel for ToolLoopFailureProvider {
+        fn provider(&self) -> &'static str {
+            "anthropic"
+        }
+
+        async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![ModelInfo {
+                id: "anthropic/test-model".into(),
+                name: "Test".into(),
+                context_window: 8_000,
+                max_output: 1_000,
+                vision: false,
+            }])
+        }
+
+        async fn stream(
+            &self,
+            req: ModelRequest,
+        ) -> Result<BoxStream<Result<ModelEvent, ProviderError>>, ProviderError> {
+            let mut guard = self.calls.lock().unwrap();
+            let call = *guard;
+            *guard += 1;
+            drop(guard);
+
+            if call == 0 {
+                assert!(
+                    !req.tools.is_empty(),
+                    "expected tool declarations on first pass"
+                );
+                return Ok(Box::pin(stream::iter([
+                    Ok(ModelEvent::ToolUseStart {
+                        id: "call_fail_1".into(),
+                        name: "bash".into(),
+                        thought_signature: None,
+                    }),
+                    Ok(ModelEvent::ToolUseInputDelta {
+                        id: "call_fail_1".into(),
+                        delta: "{\"command\":\"echo hi\"}".into(),
+                    }),
+                    Ok(ModelEvent::ToolUseEnd {
+                        id: "call_fail_1".into(),
+                    }),
+                ])));
+            }
+
+            assert!(
+                req.messages.iter().any(|m| {
+                    m.content.iter().any(|p| {
+                        matches!(p, ContentPart::ToolResult { content, .. } if content.contains("invalid args for bash"))
+                    })
+                }),
+                "expected replayed failed tool_result on second pass"
+            );
+
+            Ok(Box::pin(stream::iter([
+                Ok(ModelEvent::TextDelta {
+                    delta: "recovered".into(),
+                }),
+                Ok(ModelEvent::Done {
+                    reason: "stop".into(),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl LanguageModel for ToolLoopSecondPassPendingProvider {
+        fn provider(&self) -> &'static str {
+            "anthropic"
+        }
+
+        async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![ModelInfo {
+                id: "anthropic/test-model".into(),
+                name: "Test".into(),
+                context_window: 8_000,
+                max_output: 1_000,
+                vision: false,
+            }])
+        }
+
+        async fn stream(
+            &self,
+            req: ModelRequest,
+        ) -> Result<BoxStream<Result<ModelEvent, ProviderError>>, ProviderError> {
+            let mut guard = self.calls.lock().unwrap();
+            let call = *guard;
+            *guard += 1;
+            drop(guard);
+
+            if call == 0 {
+                assert!(
+                    !req.tools.is_empty(),
+                    "expected tool declarations on first pass"
+                );
+                return Ok(Box::pin(stream::iter([
+                    Ok(ModelEvent::ToolUseStart {
+                        id: "call_cancel_1".into(),
+                        name: "bash".into(),
+                        thought_signature: None,
+                    }),
+                    Ok(ModelEvent::ToolUseInputDelta {
+                        id: "call_cancel_1".into(),
+                        delta: "{\"command\":\"echo hi\",\"description\":\"Echo\"}".into(),
+                    }),
+                    Ok(ModelEvent::ToolUseEnd {
+                        id: "call_cancel_1".into(),
+                    }),
+                ])));
+            }
+
+            self.second_pass_started.notify_waiters();
+            Ok(Box::pin(stream::pending()))
         }
     }
 
@@ -819,5 +1211,434 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert!(matches!(second_result, Err(SessionError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn supported_provider_tool_loop_persists_artifacts_and_completes() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let registry = Arc::new(ModelRegistry::new());
+        registry
+            .register("anthropic", Arc::new(ToolLoopProvider::new()))
+            .await;
+        let bus = Arc::new(BroadcastBus::default_capacity());
+        let mut rx = bus.subscribe();
+
+        let engine = SessionEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&bus),
+            registry,
+            Some("anthropic/test-model".into()),
+        );
+
+        engine
+            .prompt(SessionPrompt {
+                session_id,
+                text: "list files".into(),
+                model: None,
+                plan_mode: false,
+            })
+            .await
+            .unwrap();
+
+        let history = storage.list_history_with_parts(session_id).await.unwrap();
+        assert!(
+            history
+                .iter()
+                .any(|m| m.info.data["role"] == "tool" && m.parts[0].data["type"] == "tool_result")
+        );
+        assert!(history.iter().any(|m| {
+            m.info.data["role"] == "assistant"
+                && m.parts
+                    .iter()
+                    .any(|p| p.data["type"] == "tool_use" && p.data["name"] == "bash")
+        }));
+
+        let mut events = Vec::new();
+        for _ in 0..16 {
+            let event = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .expect("expected session events")
+                .expect("bus event should be available");
+            let done = matches!(
+                event,
+                BusEvent::SessionCompleted { session_id: sid } if sid == session_id
+            );
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+
+        let started_idx = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    BusEvent::ToolStarted {
+                        session_id: sid,
+                        tool,
+                        call_id
+                    } if *sid == session_id && tool == "bash" && call_id == "call_1"
+                )
+            })
+            .expect("expected ToolStarted event for successful tool call");
+        let finished_idx = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    BusEvent::ToolFinished {
+                        session_id: sid,
+                        tool,
+                        call_id,
+                        ok
+                    } if *sid == session_id && tool == "bash" && call_id == "call_1" && *ok
+                )
+            })
+            .expect("expected ToolFinished(ok=true) event for successful tool call");
+        assert!(
+            started_idx < finished_idx,
+            "ToolStarted must be published before ToolFinished(ok=true)"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_in_flight_tool_capable_loop_and_releases_run_state() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let second_pass_started = Arc::new(tokio::sync::Notify::new());
+        let registry = Arc::new(ModelRegistry::new());
+        registry
+            .register(
+                "anthropic",
+                Arc::new(ToolLoopSecondPassPendingProvider::new(Arc::clone(
+                    &second_pass_started,
+                ))),
+            )
+            .await;
+        let engine = Arc::new(SessionEngine::new(
+            Arc::clone(&storage),
+            Arc::new(BroadcastBus::default_capacity()),
+            registry,
+            Some("anthropic/test-model".into()),
+        ));
+
+        let runner = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .prompt(SessionPrompt {
+                        session_id,
+                        text: "run tool then wait".into(),
+                        model: None,
+                        plan_mode: false,
+                    })
+                    .await
+            })
+        };
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            second_pass_started.notified(),
+        )
+        .await
+        .expect("second provider pass should start after tool execution");
+
+        engine.cancel(session_id).await.unwrap();
+
+        let prompt_result = tokio::time::timeout(std::time::Duration::from_millis(300), runner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(prompt_result, Err(SessionError::Cancelled)));
+
+        let history = storage.list_history_with_parts(session_id).await.unwrap();
+        assert!(history.iter().any(|message| {
+            message.info.data["role"] == "assistant"
+                && message.parts.iter().any(|part| {
+                    part.data["type"] == "tool_use" && part.data["id"] == "call_cancel_1"
+                })
+        }));
+        assert!(history.iter().any(|message| {
+            message.info.data["role"] == "tool"
+                && message.parts.iter().any(|part| {
+                    part.data["type"] == "tool_result"
+                        && part.data["tool_use_id"] == "call_cancel_1"
+                        && part.data["is_error"] == false
+                })
+        }));
+
+        let err = engine.cancel(session_id).await.unwrap_err();
+        assert!(matches!(err, SessionError::NoActiveRun(_)));
+    }
+
+    #[tokio::test]
+    async fn failed_tool_execution_persists_error_result_and_publishes_failed_lifecycle() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let bus = Arc::new(BroadcastBus::default_capacity());
+        let mut rx = bus.subscribe();
+        let registry = Arc::new(ModelRegistry::new());
+        registry
+            .register("anthropic", Arc::new(ToolLoopFailureProvider::new()))
+            .await;
+        let engine = SessionEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&bus),
+            registry,
+            Some("anthropic/test-model".into()),
+        );
+
+        engine
+            .prompt(SessionPrompt {
+                session_id,
+                text: "trigger failure".into(),
+                model: None,
+                plan_mode: false,
+            })
+            .await
+            .unwrap();
+
+        let history = storage.list_history_with_parts(session_id).await.unwrap();
+        let failed_tool_result = history
+            .iter()
+            .find(|message| message.info.data["role"] == "tool")
+            .and_then(|message| message.parts.first())
+            .expect("expected persisted tool result message");
+        assert_eq!(failed_tool_result.data["type"], "tool_result");
+        assert_eq!(failed_tool_result.data["tool_use_id"], "call_fail_1");
+        assert_eq!(failed_tool_result.data["is_error"], true);
+        assert!(
+            failed_tool_result.data["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid args for bash")
+        );
+
+        let mut events = Vec::new();
+        for _ in 0..16 {
+            let event = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .expect("expected session events")
+                .expect("bus event should be available");
+            let done = matches!(
+                event,
+                BusEvent::SessionCompleted { session_id: sid } if sid == session_id
+            );
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+
+        let started_idx = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    BusEvent::ToolStarted {
+                        session_id: sid,
+                        tool,
+                        call_id
+                    } if *sid == session_id && tool == "bash" && call_id == "call_fail_1"
+                )
+            })
+            .expect("expected ToolStarted event for failed tool call");
+        let finished_idx = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    BusEvent::ToolFinished {
+                        session_id: sid,
+                        tool,
+                        call_id,
+                        ok
+                    } if *sid == session_id && tool == "bash" && call_id == "call_fail_1" && !ok
+                )
+            })
+            .expect("expected ToolFinished(ok=false) event for failed tool call");
+        assert!(
+            started_idx < finished_idx,
+            "ToolStarted must be published before ToolFinished(ok=false)"
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_provider_tool_call_returns_provider_error() {
+        struct StubToolCallProvider;
+
+        #[async_trait]
+        impl LanguageModel for StubToolCallProvider {
+            fn provider(&self) -> &'static str {
+                "stub"
+            }
+
+            async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+                Ok(vec![ModelInfo {
+                    id: "stub/test-model".into(),
+                    name: "Test".into(),
+                    context_window: 8_000,
+                    max_output: 1_000,
+                    vision: false,
+                }])
+            }
+
+            async fn stream(
+                &self,
+                _req: ModelRequest,
+            ) -> Result<BoxStream<Result<ModelEvent, ProviderError>>, ProviderError> {
+                Ok(Box::pin(stream::iter([
+                    Ok(ModelEvent::ToolUseStart {
+                        id: "call_1".into(),
+                        name: "bash".into(),
+                        thought_signature: None,
+                    }),
+                    Ok(ModelEvent::ToolUseInputDelta {
+                        id: "call_1".into(),
+                        delta: "{}".into(),
+                    }),
+                    Ok(ModelEvent::ToolUseEnd {
+                        id: "call_1".into(),
+                    }),
+                ])))
+            }
+        }
+
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let registry = Arc::new(ModelRegistry::new());
+        registry
+            .register("stub", Arc::new(StubToolCallProvider))
+            .await;
+        let engine = SessionEngine::new(
+            Arc::clone(&storage),
+            Arc::new(BroadcastBus::default_capacity()),
+            registry,
+            Some("stub/test-model".into()),
+        );
+
+        let err = engine
+            .prompt(SessionPrompt {
+                session_id,
+                text: "hi".into(),
+                model: None,
+                plan_mode: false,
+            })
+            .await
+            .unwrap_err();
+
+        match err {
+            SessionError::Provider(message) => {
+                assert!(
+                    message.contains("does not support runtime tool execution in this MVP"),
+                    "expected explicit deferred-scope signal, got: {message}"
+                );
+            }
+            other => panic!("expected provider error, got {other}"),
+        }
+
+        let history = storage.list_history_with_parts(session_id).await.unwrap();
+        assert!(history.iter().any(|message| {
+            message.info.data["role"] == "assistant"
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| part.data["type"] == "tool_use" && part.data["name"] == "bash")
+        }));
+        assert!(
+            !history
+                .iter()
+                .any(|message| message.info.data["role"] == "tool"),
+            "out-of-scope provider path must not pretend runtime tool execution by persisting tool_result"
+        );
+    }
+
+    #[test]
+    fn history_to_model_messages_preserves_tool_use_thought_signature() {
+        let sid = SessionId::new();
+        let mid = MessageId::new();
+        let pid = PartId::new();
+
+        let history = vec![MessageWithParts {
+            info: MessageRow {
+                id: mid,
+                session_id: sid,
+                time_created: 1,
+                time_updated: 1,
+                data: serde_json::json!({ "role": "assistant" }),
+            },
+            parts: vec![PartRow {
+                id: pid,
+                message_id: mid,
+                session_id: sid,
+                time_created: 1,
+                time_updated: 1,
+                data: serde_json::json!({
+                    "type": "tool_use",
+                    "id": "call_sig_1",
+                    "name": "bash",
+                    "input": { "command": "ls" },
+                    "thought_signature": "sig-history"
+                }),
+            }],
+        }];
+
+        let messages = history_to_model_messages(&history);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert!(matches!(
+            &messages[0].content[0],
+            ContentPart::ToolUse {
+                id,
+                name,
+                input,
+                thought_signature,
+            } if id == "call_sig_1"
+                && name == "bash"
+                && input["command"] == "ls"
+                && thought_signature.as_deref() == Some("sig-history")
+        ));
     }
 }

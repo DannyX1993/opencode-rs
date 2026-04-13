@@ -6,8 +6,8 @@ Project documentation for the Rust workspace.
 
 | File | Purpose |
 | --- | --- |
-| [`MANUAL_TESTING.md`](MANUAL_TESTING.md) | Manual validation of the provider streaming harness |
-| [`SESSION_RUNTIME.md`](SESSION_RUNTIME.md) | Runtime-core architecture and current session behavior |
+| [`MANUAL_TESTING.md`](MANUAL_TESTING.md) | Manual validation of the session runtime HTTP path and raw provider harness |
+| [`SESSION_RUNTIME.md`](SESSION_RUNTIME.md) | Current bounded session runtime/tool-loop behavior |
 
 ## What Belongs Here
 
@@ -17,9 +17,12 @@ Project documentation for the Rust workspace.
 
 ## Current Focus
 
-The most concrete operational guide today is the provider harness manual test flow. That reflects the current codebase: the HTTP server, provider adapters, and storage layer exist, while the full interactive session loop is still incomplete.
+The most concrete operational guides today are:
 
-The session runtime core shipped in recent work is documented separately in `SESSION_RUNTIME.md`, including what is implemented now and what remains deferred.
+- the session-runtime HTTP path (`projects -> sessions -> prompt -> messages`)
+- the lower-level provider harness (`POST /api/v1/provider/stream`)
+
+The session runtime document is intentionally implementation-faithful: Anthropic/Google tool-loop support exists, while broader parity items remain deferred.
 
 ## How To Verify Docs Against Code
 

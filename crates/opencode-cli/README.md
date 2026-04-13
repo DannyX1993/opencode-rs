@@ -23,7 +23,7 @@ Active. This crate is used by the current binary and has real tests around comma
 | `prompt <text>` | no | parsed here, still stubbed in runtime |
 | `version` | yes | printed by `opencode` |
 | `config [--show]` | partial | `--show` works; edit mode is stubbed |
-| `tool <name>` | yes | invokes built-in tool registry |
+| `tool <name>` | yes | invokes built-in tool registry directly |
 
 ## Tool Command
 
@@ -34,6 +34,8 @@ opencode tool <NAME> [--args-json '<JSON>'] [--output text|json]
 ```
 
 Supported output values are exactly `text` and `json`.
+
+This command is separate from the session prompt runtime: it executes a single built-in tool immediately and does not involve model selection, session persistence, or provider-driven tool calls.
 
 Examples:
 

@@ -15,4 +15,4 @@ pub mod types;
 
 pub use common::Ctx;
 pub use registry::ToolRegistry;
-pub use types::{Tool, ToolCall, ToolError, ToolPolicy, ToolResult};
+pub use types::{Tool, ToolCall, ToolDefinition, ToolError, ToolPolicy, ToolResult};

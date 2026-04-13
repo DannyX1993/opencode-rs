@@ -26,6 +26,22 @@ impl Tool for GlobTool {
         "glob"
     }
 
+    fn description(&self) -> &'static str {
+        "Find files matching a glob pattern under a path."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        })
+    }
+
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
         let pattern = call.args["pattern"]
             .as_str()

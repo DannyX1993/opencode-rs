@@ -30,6 +30,8 @@ struct Part {
     function_call: Option<FunctionCallPart>,
     #[serde(rename = "functionResponse", skip_serializing_if = "Option::is_none")]
     function_response: Option<FunctionResponsePart>,
+    #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -98,6 +100,8 @@ struct ResponsePart {
     text: Option<String>,
     #[serde(rename = "functionCall")]
     function_call: Option<ResponseFunctionCall>,
+    #[serde(rename = "thoughtSignature", default)]
+    thought_signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -150,9 +154,18 @@ fn names(req: &ModelRequest) -> BTreeMap<String, String> {
 }
 
 fn to_content(msg: &ModelMessage, names: &BTreeMap<String, String>) -> Content {
-    // Google uses "model" not "assistant"
+    // Google uses "model" instead of "assistant" and wants function responses under
+    // `user` role. We keep storage/provider-neutral runtime history (`tool` role) and
+    // normalize only at the Google wire boundary during replay.
     let role = if msg.role == "assistant" {
         "model".to_string()
+    } else if msg.role == "tool"
+        && msg
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::ToolResult { .. }))
+    {
+        "user".to_string()
     } else {
         msg.role.clone()
     };
@@ -171,6 +184,7 @@ fn part_from(p: &ContentPart, names: &BTreeMap<String, String>) -> Part {
             inline_data: None,
             function_call: None,
             function_response: None,
+            thought_signature: None,
         },
         ContentPart::Image { mime, data } => Part {
             text: None,
@@ -180,8 +194,14 @@ fn part_from(p: &ContentPart, names: &BTreeMap<String, String>) -> Part {
             }),
             function_call: None,
             function_response: None,
+            thought_signature: None,
         },
-        ContentPart::ToolUse { name, input, .. } => Part {
+        ContentPart::ToolUse {
+            name,
+            input,
+            thought_signature,
+            ..
+        } => Part {
             text: None,
             inline_data: None,
             function_call: Some(FunctionCallPart {
@@ -189,6 +209,10 @@ fn part_from(p: &ContentPart, names: &BTreeMap<String, String>) -> Part {
                 args: input.clone(),
             }),
             function_response: None,
+            // Gemini expects thought signatures on the enclosing Part, not nested inside
+            // `functionCall`. Keeping that invariant here avoids replaying an invalid wire
+            // shape after a persisted session tool turn.
+            thought_signature: thought_signature.clone(),
         },
         ContentPart::ToolResult {
             tool_use_id,
@@ -205,6 +229,7 @@ fn part_from(p: &ContentPart, names: &BTreeMap<String, String>) -> Part {
                     .unwrap_or_else(|| tool_use_id.clone()),
                 response: serde_json::json!({ "output": content }),
             }),
+            thought_signature: None,
         },
     }
 }
@@ -233,8 +258,29 @@ fn build_system(req: &ModelRequest) -> Option<Content> {
             inline_data: None,
             function_call: None,
             function_response: None,
+            thought_signature: None,
         }],
     })
+}
+
+fn sanitize_google_schema(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Gemini rejects `additionalProperties` in function declaration schemas for this
+            // endpoint, including nested objects, so strip it recursively only on the Google
+            // adapter path.
+            map.remove("additionalProperties");
+            for nested in map.values_mut() {
+                sanitize_google_schema(nested);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for nested in items {
+                sanitize_google_schema(nested);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn build_tools(req: &ModelRequest) -> Vec<Tool> {
@@ -244,14 +290,26 @@ fn build_tools(req: &ModelRequest) -> Vec<Tool> {
     let decls: Vec<FunctionDeclaration> = req
         .tools
         .iter()
-        .map(|(name, schema)| FunctionDeclaration {
-            name: name.clone(),
-            description: schema
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            parameters: schema.clone(),
+        .map(|(name, schema)| {
+            let mut parameters = schema
+                .get("input_schema")
+                .cloned()
+                .unwrap_or_else(|| schema.clone());
+            sanitize_google_schema(&mut parameters);
+
+            FunctionDeclaration {
+                name: schema
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(name)
+                    .to_string(),
+                description: schema
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                parameters,
+            }
         })
         .collect();
     vec![Tool {
@@ -296,6 +354,7 @@ fn map_chunk(chunk: &GenerateContentResponse) -> Vec<ModelEvent> {
                     out.push(ModelEvent::ToolUseStart {
                         id: id.clone(),
                         name: fc.name.clone(),
+                        thought_signature: part.thought_signature.clone(),
                     });
                     let args = fc.args.to_string();
                     if !args.is_empty() {
@@ -562,6 +621,7 @@ mod tests {
                     parts: vec![ResponsePart {
                         text: Some(text.to_string()),
                         function_call: None,
+                        thought_signature: None,
                     }],
                 }),
                 finish_reason: None,
@@ -645,6 +705,7 @@ mod tests {
                 content: Some(ResponseContent {
                     parts: vec![ResponsePart {
                         text: None,
+                        thought_signature: Some("sig-123".to_string()),
                         function_call: Some(ResponseFunctionCall {
                             id: Some("call_1".to_string()),
                             name: "bash".to_string(),
@@ -659,10 +720,145 @@ mod tests {
         let events = map_chunk(&chunk);
         assert_eq!(events.len(), 3);
         assert!(
-            matches!(&events[0], ModelEvent::ToolUseStart { id, name } if id == "call_1" && name == "bash")
+            matches!(&events[0], ModelEvent::ToolUseStart { id, name, thought_signature } if id == "call_1" && name == "bash" && thought_signature.as_deref() == Some("sig-123"))
         );
         assert!(matches!(&events[1], ModelEvent::ToolUseInputDelta { .. }));
         assert!(matches!(&events[2], ModelEvent::ToolUseEnd { .. }));
+    }
+
+    #[test]
+    fn tool_use_replays_thought_signature_in_function_call() {
+        let req = ModelRequest {
+            model: "gemini-2.0-flash".into(),
+            system: vec![],
+            messages: vec![ModelMessage {
+                role: "assistant".into(),
+                content: vec![ContentPart::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"cmd": "ls"}),
+                    thought_signature: Some("sig-abc".into()),
+                }],
+            }],
+            tools: Default::default(),
+            max_tokens: Some(32),
+            temperature: None,
+        };
+
+        let names = names(&req);
+        let msg = to_content(&req.messages[0], &names);
+        let part = msg.parts.first().unwrap();
+        let function_call = part.function_call.as_ref().unwrap();
+
+        assert_eq!(function_call.name, "bash");
+        assert_eq!(function_call.args, serde_json::json!({ "cmd": "ls" }));
+        assert_eq!(part.thought_signature.as_deref(), Some("sig-abc"));
+
+        let json = serde_json::to_value(part).unwrap();
+        assert_eq!(json["thoughtSignature"], "sig-abc");
+        assert!(json["functionCall"].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn map_chunk_reads_part_level_thought_signature_from_wire_json() {
+        let wire = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "id": "call_1",
+                            "name": "bash",
+                            "args": {"cmd": "ls"}
+                        },
+                        "thoughtSignature": "sig-wire"
+                    }]
+                }
+            }]
+        });
+        let chunk: GenerateContentResponse = serde_json::from_value(wire).unwrap();
+
+        let events = map_chunk(&chunk);
+        assert!(matches!(
+            &events[0],
+            ModelEvent::ToolUseStart {
+                id,
+                name,
+                thought_signature
+            } if id == "call_1" && name == "bash" && thought_signature.as_deref() == Some("sig-wire")
+        ));
+    }
+
+    #[test]
+    fn stream_request_serializes_thought_signature_at_part_level() {
+        let req = ModelRequest {
+            model: "gemini-2.0-flash".into(),
+            system: vec![],
+            messages: vec![ModelMessage {
+                role: "assistant".into(),
+                content: vec![ContentPart::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"cmd": "ls"}),
+                    thought_signature: Some("sig-body".into()),
+                }],
+            }],
+            tools: Default::default(),
+            max_tokens: Some(32),
+            temperature: None,
+        };
+
+        let names = names(&req);
+        let body = GenerateContentRequest {
+            contents: req
+                .messages
+                .iter()
+                .map(|msg| to_content(msg, &names))
+                .collect(),
+            system_instruction: build_system(&req),
+            generation_config: Some(GenerationConfig {
+                max_output_tokens: req.max_tokens,
+                temperature: req.temperature,
+            }),
+            tools: build_tools(&req),
+        };
+
+        let json = serde_json::to_value(body).unwrap();
+        let part = &json["contents"][0]["parts"][0];
+        assert_eq!(part["thoughtSignature"], "sig-body");
+        assert!(part["functionCall"].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn tool_result_with_tool_role_normalizes_to_user_for_google() {
+        let req = ModelRequest {
+            model: "gemini-2.0-flash".into(),
+            system: vec![],
+            messages: vec![
+                ModelMessage {
+                    role: "assistant".into(),
+                    content: vec![ContentPart::ToolUse {
+                        id: "call_1".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({"cmd": "ls"}),
+                        thought_signature: None,
+                    }],
+                },
+                ModelMessage {
+                    role: "tool".into(),
+                    content: vec![ContentPart::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: "ok".into(),
+                    }],
+                },
+            ],
+            tools: Default::default(),
+            max_tokens: Some(32),
+            temperature: None,
+        };
+
+        let names = names(&req);
+        let msg = to_content(&req.messages[1], &names);
+        assert_eq!(msg.role, "user");
     }
 
     #[test]
@@ -677,6 +873,7 @@ mod tests {
                         id: "call_1".into(),
                         name: "bash".into(),
                         input: serde_json::json!({"cmd": "ls"}),
+                        thought_signature: None,
                     }],
                 },
                 ModelMessage {
@@ -701,6 +898,104 @@ mod tests {
         assert_eq!(res.id.as_deref(), Some("call_1"));
         assert_eq!(res.name, "bash");
         assert_eq!(res.response, serde_json::json!({ "output": "ok" }));
+    }
+
+    #[test]
+    fn build_tools_accepts_runtime_tool_definition_shape() {
+        let req = ModelRequest {
+            model: "gemini-2.0-flash".into(),
+            system: vec![],
+            messages: vec![],
+            tools: std::collections::BTreeMap::from([(
+                "read".into(),
+                serde_json::json!({
+                    "name": "read",
+                    "description": "Read file",
+                    "input_schema": {"type": "object", "properties": {"filePath": {"type": "string"}}}
+                }),
+            )]),
+            max_tokens: None,
+            temperature: None,
+        };
+
+        let tools = build_tools(&req);
+        assert_eq!(tools.len(), 1);
+        let decl = &tools[0].function_declarations[0];
+        assert_eq!(decl.name, "read");
+        assert_eq!(decl.description, "Read file");
+        assert_eq!(decl.parameters["type"], "object");
+    }
+
+    #[test]
+    fn build_tools_removes_additional_properties_for_google_schema_compatibility() {
+        let req = ModelRequest {
+            model: "gemini-2.0-flash".into(),
+            system: vec![],
+            messages: vec![],
+            tools: std::collections::BTreeMap::from([(
+                "write".into(),
+                serde_json::json!({
+                    "name": "write",
+                    "description": "Write file",
+                    "input_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "filePath": {"type": "string"},
+                            "metadata": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "owner": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                }),
+            )]),
+            max_tokens: None,
+            temperature: None,
+        };
+
+        let tools = build_tools(&req);
+        let decl = &tools[0].function_declarations[0];
+
+        assert_eq!(decl.name, "write");
+        assert_eq!(decl.parameters["type"], "object");
+        assert!(decl.parameters.get("additionalProperties").is_none());
+        assert!(
+            decl.parameters["properties"]["metadata"]
+                .get("additionalProperties")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn build_tools_sanitizes_legacy_parameters_without_input_schema() {
+        let req = ModelRequest {
+            model: "gemini-2.0-flash".into(),
+            system: vec![],
+            messages: vec![],
+            tools: std::collections::BTreeMap::from([(
+                "legacy_tool".into(),
+                serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "query": {"type": "string"}
+                    }
+                }),
+            )]),
+            max_tokens: None,
+            temperature: None,
+        };
+
+        let tools = build_tools(&req);
+        let decl = &tools[0].function_declarations[0];
+
+        assert_eq!(decl.name, "legacy_tool");
+        assert_eq!(decl.parameters["type"], "object");
+        assert!(decl.parameters.get("additionalProperties").is_none());
     }
 
     #[test]

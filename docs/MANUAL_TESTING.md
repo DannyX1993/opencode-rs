@@ -1,7 +1,11 @@
-# Manual Testing Guide — Provider Harness
+# Manual Testing Guide — Session Runtime + Provider Harness
 
-This guide explains how to manually test the real LLM provider implementations
-(Anthropic, OpenAI) by starting the HTTP server and using `curl`.
+This guide explains how to manually test the current Rust runtime by starting the HTTP server and using `curl`.
+
+It covers two different paths:
+
+1. the **session runtime** HTTP flow, which exercises persisted history, runtime tool execution, and replay
+2. the lower-level **provider harness**, which exercises raw provider streaming only
 
 ## Prerequisites
 
@@ -20,6 +24,7 @@ cd opencode-rs
 OPENCODE_MANUAL_HARNESS=1 \
   ANTHROPIC_API_KEY=sk-ant-... \
   OPENAI_API_KEY=sk-... \
+  GOOGLE_API_KEY=... \
   cargo run -p opencode -- server
 ```
 
@@ -33,6 +38,128 @@ OPENCODE_MANUAL_HARNESS=1 OPENAI_API_KEY=sk-... \
   cargo run -p opencode -- server --port 4000
 ```
 
+## Session runtime path (recommended for this change)
+
+Use this path to validate the `expand-tool-runtime-parity` work.
+
+### Supported providers for tool-capable turns
+
+- `anthropic`
+- `google`
+
+OpenAI is still useful for raw provider checks, but not for the bounded session tool loop.
+
+### 1) Create or upsert a project
+
+Choose a project id first and reuse it below:
+
+```bash
+PID="11111111-1111-1111-1111-111111111111"
+NOW=$(date +%s000)
+
+curl -X PUT http://localhost:4141/api/v1/projects/$PID \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "'"$PID"'",
+    "worktree": "/home/dannyx/projects/Rust/opencode-rs",
+    "vcs": "git",
+    "name": "opencode-rs",
+    "icon_url": null,
+    "icon_color": null,
+    "time_created": '"$NOW"',
+    "time_updated": '"$NOW"',
+    "time_initialized": null,
+    "sandboxes": null,
+    "commands": null
+  }'
+```
+
+This route returns `204 No Content` on success.
+
+### 2) Create a session
+
+Choose a session id up front. This route also returns no response body.
+
+```bash
+SID="22222222-2222-2222-2222-222222222222"
+
+curl -X POST http://localhost:4141/api/v1/projects/$PID/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "'"$SID"'",
+    "workspace_id": null,
+    "parent_id": null,
+    "slug": "manual-runtime-test",
+    "directory": "/home/dannyx/projects/Rust/opencode-rs",
+    "title": "Manual runtime test",
+    "version": "0.7.0",
+    "share_url": null,
+    "summary_additions": null,
+    "summary_deletions": null,
+    "summary_files": null,
+    "summary_diffs": null,
+    "revert": null,
+    "permission": null,
+    "time_created": '"$NOW"',
+    "time_updated": '"$NOW"',
+    "time_compacting": null,
+    "time_archived": null
+  }'
+```
+
+This route returns `201 Created` on success.
+
+### 3) Start a prompt turn
+
+Anthropic example:
+
+```bash
+curl -X POST http://localhost:4141/api/v1/sessions/$SID/prompt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "List the Rust crates in this workspace using available tools.",
+    "model": "anthropic/claude-3-5-sonnet-20241022"
+  }'
+```
+
+Google example:
+
+```bash
+curl -X POST http://localhost:4141/api/v1/sessions/$SID/prompt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Read the root README and summarize the current runtime tool support.",
+    "model": "google/gemini-2.0-flash"
+  }'
+```
+
+The route returns `202 Accepted` when the run is queued successfully.
+
+### 4) Inspect persisted messages and tool replay artifacts
+
+```bash
+curl http://localhost:4141/api/v1/sessions/$SID/messages
+```
+
+Look for persisted parts/messages such as:
+
+- user text message
+- assistant text parts
+- assistant `tool_use` part
+- `tool` role message containing a `tool_result` part
+
+That confirms the provider -> tool -> provider loop was replayed from storage.
+
+### 5) Optional: cancel an in-flight run
+
+```bash
+curl -X POST http://localhost:4141/api/v1/sessions/$SID/cancel
+```
+
+## Raw provider harness path
+
+Use this only when you want to validate the provider adapter itself without session persistence.
+
 ## Endpoints
 
 ### `POST /api/v1/provider/stream`
@@ -43,7 +170,7 @@ Streams model events as Server-Sent Events (one JSON object per `data:` line).
 
 | Field        | Type   | Required | Description                                    |
 | ------------ | ------ | -------- | ---------------------------------------------- |
-| `provider`   | string | ✅       | Provider id: `"anthropic"` or `"openai"`       |
+| `provider`   | string | ✅       | Provider id: `"anthropic"`, `"google"`, or `"openai"` |
 | `model`      | string | ✅       | Model id (e.g. `"claude-3-5-sonnet-20241022"`) |
 | `prompt`     | string | ✅       | The user message text                          |
 | `max_tokens` | number | optional | Token cap (default: 1024)                      |
@@ -95,6 +222,19 @@ curl -N -X POST http://localhost:4141/api/v1/provider/stream \
   }'
 ```
 
+## Example: Google (Gemini)
+
+```bash
+curl -N -X POST http://localhost:4141/api/v1/provider/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "google",
+    "model": "gemini-2.0-flash",
+    "prompt": "What is 2 + 2?",
+    "max_tokens": 64
+  }'
+```
+
 ## Example: Missing / Wrong Key (expected 502)
 
 ```bash
@@ -132,3 +272,9 @@ requires a real API key and makes live network requests to external providers.
   cannot be enabled via the API itself.
 - All API keys are read from environment variables at startup; they are
   never stored or logged.
+
+## Important scope notes
+
+- `POST /api/v1/provider/stream` does **not** exercise session persistence or the runtime tool loop.
+- `POST /api/v1/sessions/:sid/prompt` is the correct path for validating the bounded Anthropic/Google runtime parity work.
+- The current workspace version remains `0.7.0`.

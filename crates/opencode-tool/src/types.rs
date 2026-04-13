@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Runtime-facing metadata exposed for provider tool declarations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// Stable tool name.
+    pub name: String,
+    /// Human-readable usage summary.
+    pub description: String,
+    /// JSON Schema for tool input arguments.
+    pub input_schema: serde_json::Value,
+}
+
 /// Resource policy describing what a tool may access.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolPolicy {
@@ -69,6 +80,20 @@ impl ToolResult {
             metadata: serde_json::Value::Null,
             output_path: None,
         }
+    }
+
+    /// Format this result as provider-facing `tool_result` text payload.
+    #[must_use]
+    pub fn as_provider_tool_result_content(&self) -> String {
+        let mut sections = Vec::new();
+        if !self.title.trim().is_empty() {
+            sections.push(format!("Title: {}", self.title.trim()));
+        }
+        sections.push(self.output.clone());
+        if let Some(path) = &self.output_path {
+            sections.push(format!("Truncated output saved at: {}", path.display()));
+        }
+        sections.join("\n\n")
     }
 }
 
@@ -141,6 +166,16 @@ pub enum ToolError {
 pub trait Tool: Send + Sync {
     /// Stable tool name (snake_case, e.g. `"bash"`, `"read"`).
     fn name(&self) -> &'static str;
+
+    /// Human-readable tool description used for provider declarations.
+    fn description(&self) -> &'static str {
+        ""
+    }
+
+    /// JSON schema for tool invocation args.
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{},"additionalProperties":true})
+    }
 
     /// Resource policy — used by the planner to detect conflicts.
     fn policy(&self) -> ToolPolicy {
@@ -236,5 +271,16 @@ mod tests {
         assert!(p.reads.is_empty());
         assert!(!p.net);
         assert!(!p.exclusive);
+    }
+
+    #[test]
+    fn tool_result_formats_provider_tool_result_content() {
+        let mut res = ToolResult::ok("call_1".into(), "Run ls".into(), "file_a\nfile_b".into());
+        res.output_path = Some("/tmp/tool-output.txt".into());
+
+        let content = res.as_provider_tool_result_content();
+        assert!(content.contains("Run ls"));
+        assert!(content.contains("file_a"));
+        assert!(content.contains("/tmp/tool-output.txt"));
     }
 }

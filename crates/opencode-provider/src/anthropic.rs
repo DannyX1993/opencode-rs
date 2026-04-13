@@ -36,7 +36,9 @@ fn to_sdk_message(msg: &ModelMessage) -> Message {
                 // Skip silently; callers relying on images must use a raw HTTP path.
                 None
             }
-            ContentPart::ToolUse { id, name, input } => Some(MessageContent::ToolUse(ToolUse {
+            ContentPart::ToolUse {
+                id, name, input, ..
+            } => Some(MessageContent::ToolUse(ToolUse {
                 id: id.clone(),
                 name: name.clone(),
                 input: input.clone(),
@@ -80,6 +82,44 @@ fn build_system(req: &ModelRequest) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+fn build_tools(req: &ModelRequest) -> Option<Vec<serde_json::Map<String, serde_json::Value>>> {
+    if req.tools.is_empty() {
+        return None;
+    }
+
+    let tools = req
+        .tools
+        .iter()
+        .map(|(name, schema)| {
+            let tool_name = schema
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(name)
+                .to_string();
+            let description = schema
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let input_schema = schema
+                .get("input_schema")
+                .cloned()
+                .unwrap_or_else(|| schema.clone());
+
+            serde_json::Map::from_iter([
+                ("name".to_string(), serde_json::Value::String(tool_name)),
+                (
+                    "description".to_string(),
+                    serde_json::Value::String(description),
+                ),
+                ("input_schema".to_string(), input_schema),
+            ])
+        })
+        .collect();
+
+    Some(tools)
+}
+
 // ── Map a single Anthropic SSE event (SDK type) to ModelEvent(s) ─────────────
 
 /// Map a single `MessagesStreamEvent` (from the `async-anthropic` SDK) to 0..N `ModelEvent`s.
@@ -106,6 +146,7 @@ pub fn map_event(ev: &MessagesStreamEvent) -> Vec<ModelEvent> {
                 vec![ModelEvent::ToolUseStart {
                     id: tool.id.clone(),
                     name: tool.name.clone(),
+                    thought_signature: None,
                 }]
             } else {
                 let _ = index;
@@ -237,7 +278,7 @@ impl LanguageModel for AnthropicProvider {
             metadata: None,
             stop_sequences: None,
             tool_choice: None,
-            tools: None,
+            tools: build_tools(&req),
             top_k: None,
             top_p: None,
         };
@@ -343,7 +384,7 @@ mod tests {
     use futures::StreamExt;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path as wm_path},
+        matchers::{body_string_contains, method, path as wm_path},
     };
 
     fn text_req(model: &str, text: &str) -> ModelRequest {
@@ -358,6 +399,28 @@ mod tests {
             max_tokens: Some(256),
             temperature: None,
         }
+    }
+
+    #[test]
+    fn build_tools_maps_runtime_schema_contract() {
+        let mut req = text_req("claude-3-haiku-20240307", "hi");
+        req.tools.insert(
+            "bash".into(),
+            serde_json::json!({
+                "name": "bash",
+                "description": "Execute shell commands",
+                "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}
+            }),
+        );
+
+        let tools = build_tools(&req).expect("tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].get("name").unwrap(), "bash");
+        assert_eq!(
+            tools[0].get("description").unwrap(),
+            "Execute shell commands"
+        );
+        assert_eq!(tools[0]["input_schema"]["type"], "object");
     }
 
     // ── Unit tests for map_event (pure, no network) ───────────────────────────
@@ -390,7 +453,7 @@ mod tests {
         let events = map_event(&ev);
         assert_eq!(events.len(), 1);
         assert!(
-            matches!(&events[0], ModelEvent::ToolUseStart { id, name } if id == "call_abc" && name == "bash")
+            matches!(&events[0], ModelEvent::ToolUseStart { id, name, .. } if id == "call_abc" && name == "bash")
         );
     }
 
@@ -589,5 +652,40 @@ mod tests {
             }
             other => panic!("expected Auth error, got {:?}", other.err()),
         }
+    }
+
+    #[tokio::test]
+    async fn stream_request_includes_tools_payload() {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .and(body_string_contains("\"tools\""))
+            .and(body_string_contains("\"name\":\"bash\""))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_fixture()),
+            )
+            .mount(&srv)
+            .await;
+
+        let auth: Arc<dyn AuthResolver> = Arc::new(EnvAuthResolver::new(
+            "anthropic",
+            "ANTHROPIC_API_KEY_NONEXISTENT",
+            Some("test-key".into()),
+        ));
+        let provider = AnthropicProvider::with_base_url(auth, srv.uri());
+        let mut req = text_req("claude-3-haiku-20240307", "hi");
+        req.tools.insert(
+            "bash".into(),
+            serde_json::json!({
+                "name": "bash",
+                "description": "Execute shell command",
+                "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}
+            }),
+        );
+
+        let mut stream = provider.stream(req).await.unwrap();
+        while stream.next().await.is_some() {}
     }
 }

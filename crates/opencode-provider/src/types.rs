@@ -76,6 +76,9 @@ pub enum ContentPart {
         name: String,
         /// Arguments JSON.
         input: serde_json::Value,
+        /// Google/Gemini replay metadata for tool calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     /// Tool result provided back to the model.
     ToolResult {
@@ -102,6 +105,9 @@ pub enum ModelEvent {
         id: String,
         /// Tool name.
         name: String,
+        /// Provider-specific replay metadata (Gemini thought signature).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     /// Input JSON accumulation for a tool-use.
     ToolUseInputDelta {

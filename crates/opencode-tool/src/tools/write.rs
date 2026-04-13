@@ -18,6 +18,22 @@ impl Tool for WriteTool {
         "write"
     }
 
+    fn description(&self) -> &'static str {
+        "Create or overwrite a file with provided text content."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type": "string"},
+                "content": {"type": "string"}
+            },
+            "required": ["filePath", "content"],
+            "additionalProperties": false
+        })
+    }
+
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
         let content = call.args["content"]
             .as_str()

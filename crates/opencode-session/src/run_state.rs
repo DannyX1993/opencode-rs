@@ -77,8 +77,12 @@ impl RunState {
             .sessions
             .lock()
             .expect("run-state mutex poisoned")
-            .remove(&session_id);
+            .get(&session_id)
+            .cloned();
         if let Some(token) = token {
+            if token.is_cancelled() {
+                return false;
+            }
             token.cancel();
             true
         } else {
@@ -137,7 +141,11 @@ mod tests {
         assert!(guard.cancellation_token().is_cancelled());
         assert!(!runs.cancel(session_id).await);
 
-        let reacquired = runs.acquire(session_id).await;
-        assert!(reacquired.is_ok());
+        let while_guard_live = runs.acquire(session_id).await;
+        assert!(matches!(while_guard_live, Err(SessionError::Busy(_))));
+
+        drop(guard);
+        let reacquired_after_drop = runs.acquire(session_id).await;
+        assert!(reacquired_after_drop.is_ok());
     }
 }

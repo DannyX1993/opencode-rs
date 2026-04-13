@@ -49,6 +49,21 @@ impl Tool for LsTool {
         "list"
     }
 
+    fn description(&self) -> &'static str {
+        "List files as a directory tree with ignore support."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "ignore": {"type": "array", "items": {"type": "string"}}
+            },
+            "additionalProperties": false
+        })
+    }
+
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
         let search: PathBuf = match call.args["path"].as_str() {
             Some(p) => {

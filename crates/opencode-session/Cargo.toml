@@ -12,6 +12,7 @@ rust-version.workspace = true
 opencode-core    = { workspace = true }
 opencode-bus     = { workspace = true }
 opencode-provider = { workspace = true }
+opencode-tool    = { workspace = true }
 opencode-storage = { workspace = true }
 tokio            = { workspace = true }
 futures          = { workspace = true }

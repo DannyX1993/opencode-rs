@@ -19,6 +19,23 @@ impl Tool for ReadTool {
         "read"
     }
 
+    fn description(&self) -> &'static str {
+        "Read a text file or list directory entries with pagination."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1}
+            },
+            "required": ["filePath"],
+            "additionalProperties": false
+        })
+    }
+
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
         let file_path: String = call.args["filePath"]
             .as_str()

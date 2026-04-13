@@ -18,9 +18,9 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 | [`opencode-plugin`](opencode-plugin) | stub | Placeholder for future plugin hosting |
 | [`opencode-provider`](opencode-provider) | active | Provider registry and OpenAI/Anthropic/Google adapters |
 | [`opencode-server`](opencode-server) | active | Axum router and HTTP endpoints |
-| [`opencode-session`](opencode-session) | partial | Session runtime core (`prompt`, `cancel`, stream persistence, run-state) |
+| [`opencode-session`](opencode-session) | partial | Bounded session runtime loop (`prompt`, `cancel`, history replay, tool persistence, run-state) |
 | [`opencode-storage`](opencode-storage) | active | SQLite persistence and repositories |
-| [`opencode-tool`](opencode-tool) | active | Tool runtime and built-in file/shell tools |
+| [`opencode-tool`](opencode-tool) | active | Tool runtime, built-in file/shell tools, and provider-facing tool metadata |
 | [`opencode-tui`](opencode-tui) | stub | Placeholder for future terminal UI |
 
 ## Status Notes
@@ -31,7 +31,7 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 
 Current notable `partial` crate details:
 
-- `opencode-session` now includes runtime core orchestration and cancellation semantics, but tool-use event execution and broader runtime parity are still deferred.
+- `opencode-session` now includes the bounded Anthropic/Google runtime tool loop with persisted replay, but broader parity items (OpenAI tool execution, approval flows, richer UI/event contracts) remain deferred.
 
 ## Build And Test
 

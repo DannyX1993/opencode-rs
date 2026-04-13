@@ -36,6 +36,23 @@ impl Tool for GrepTool {
         "grep"
     }
 
+    fn description(&self) -> &'static str {
+        "Search file contents with a regex pattern."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string"},
+                "include": {"type": "string"}
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        })
+    }
+
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
         let pattern = call.args["pattern"]
             .as_str()

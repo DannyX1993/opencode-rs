@@ -21,6 +21,24 @@ impl Tool for BashTool {
         "bash"
     }
 
+    fn description(&self) -> &'static str {
+        "Execute a shell command with optional timeout and working directory."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "description": {"type": "string"},
+                "timeout": {"type": "integer", "minimum": 0},
+                "workdir": {"type": "string"}
+            },
+            "required": ["command", "description"],
+            "additionalProperties": false
+        })
+    }
+
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
         let cmd = call.args["command"]
             .as_str()

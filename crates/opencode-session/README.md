@@ -4,7 +4,7 @@ Session runtime core for the Rust agent loop.
 
 ## Status
 
-Partial. The crate now has a functional runtime core (`prompt` + `cancel` flow, run-state coordination, provider stream consumption, and incremental assistant-part persistence), but not yet full tool/runtime parity.
+Partial. The crate now has a functional bounded session runtime loop: prompt/cancel flow, history-based replay, provider-driven built-in tool execution for Anthropic/Google, persisted tool artifacts, lifecycle events, and cancellation-safe run ownership. Full runtime parity is still intentionally out of scope.
 
 ## What Exists Today
 
@@ -12,18 +12,28 @@ Partial. The crate now has a functional runtime core (`prompt` + `cancel` flow, 
 - `SessionEngine` that:
   - verifies target session existence
   - resolves model/provider from request/default config
+  - rebuilds provider requests from persisted session history on each provider pass
   - writes user message + assistant shell into storage
   - streams provider output and appends text deltas as message parts
+  - executes supported built-in tools when Anthropic/Google emit tool-use events
+  - persists assistant `tool_use` parts plus `tool` role `tool_result` messages for replay
   - publishes lifecycle and token-usage events over `opencode-bus`
 - per-session exclusivity + cancellation support via `RunState`
 - HTTP-facing handle metadata (`assistant_message_id`, `resolved_model`) for route responses
-- runtime-focused tests for streaming, cancellation, run-state exclusivity, and error mapping
+- runtime-focused tests for streaming, tool loops, cancellation, run-state exclusivity, and error mapping
+
+## Supported scope in this crate
+
+- Anthropic and Google can drive the bounded runtime tool loop.
+- Persisted history is the source of truth for replay between provider passes.
+- Tool results are stored in a provider-agnostic session shape; provider adapters normalize any wire-specific replay requirements.
 
 ## What Does Not Exist Yet
 
-- tool-use event execution loop (`ToolUse*` provider stream events are deferred)
-- full TS-parity prompt lifecycle (permissions, interactive questions, richer run-state/reporting)
+- OpenAI runtime tool-loop parity for session prompts
+- permission/approval flows, interactive questions, task/subagent orchestration, or broader TS-parity prompt lifecycle
 - broader CLI/TUI integration (`opencode prompt` command remains stubbed in binary runtime)
+- new public SSE/session-frame contracts for tool lifecycle projection
 
 ## Runtime Behavior Snapshot
 
@@ -31,7 +41,8 @@ Partial. The crate now has a functional runtime core (`prompt` + `cancel` flow, 
 - Concurrent prompt for the same session returns `SessionError::Busy`.
 - `cancel` returns `SessionError::NoActiveRun` if no run is active.
 - Cancellation keeps already-persisted deltas and emits `SessionCancelled`.
-- Unsupported tool-use stream events currently return a runtime-internal error by design (deferred scope).
+- Anthropic/Google tool-capable turns persist `tool_use` and `tool_result` artifacts before replaying the next provider pass.
+- Out-of-scope providers/tool families fail clearly instead of pretending tool support.
 
 ## Workspace Integration
 

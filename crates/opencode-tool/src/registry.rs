@@ -1,7 +1,7 @@
 //! Thread-safe tool registry.
 
 use crate::common::Ctx;
-use crate::types::{Tool, ToolCall, ToolError, ToolResult};
+use crate::types::{Tool, ToolCall, ToolDefinition, ToolError, ToolResult};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
@@ -46,6 +46,31 @@ impl ToolRegistry {
     /// Retrieve a tool by name.
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.read().await.get(name).cloned()
+    }
+
+    /// Retrieve all registered tool definitions sorted by tool name.
+    pub async fn definitions(&self) -> Vec<ToolDefinition> {
+        let tools = self.tools.read().await;
+        let mut defs: Vec<ToolDefinition> = tools
+            .values()
+            .map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                input_schema: tool.input_schema(),
+            })
+            .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+
+    /// Retrieve one tool definition by tool name.
+    pub async fn definition(&self, name: &str) -> Option<ToolDefinition> {
+        let tool = self.get(name).await?;
+        Some(ToolDefinition {
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            input_schema: tool.input_schema(),
+        })
     }
 
     /// Invoke a tool by name.
@@ -140,5 +165,44 @@ mod tests {
         for name in &["read", "list", "glob", "grep", "write", "bash"] {
             assert!(reg.get(name).await.is_some(), "missing tool: {name}");
         }
+    }
+
+    #[tokio::test]
+    async fn definitions_expose_schema_and_descriptions() {
+        use std::path::PathBuf;
+
+        let ctx = Ctx::new(
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp/out"),
+            "/bin/sh".into(),
+            5_000,
+        );
+        let reg = ToolRegistry::with_builtins(ctx);
+
+        let defs = reg.definitions().await;
+        assert_eq!(defs.len(), 6);
+        assert!(defs.iter().any(|d| d.name == "bash"));
+        assert!(defs.iter().all(|d| !d.description.is_empty()));
+        assert!(defs.iter().all(|d| d.input_schema.is_object()));
+    }
+
+    #[tokio::test]
+    async fn definition_returns_single_tool_metadata() {
+        use std::path::PathBuf;
+
+        let ctx = Ctx::new(
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp/out"),
+            "/bin/sh".into(),
+            5_000,
+        );
+        let reg = ToolRegistry::with_builtins(ctx);
+
+        let bash = reg.definition("bash").await.expect("bash definition");
+        assert_eq!(bash.name, "bash");
+        assert!(bash.input_schema["properties"]["command"].is_object());
+        assert!(reg.definition("nope").await.is_none());
     }
 }
