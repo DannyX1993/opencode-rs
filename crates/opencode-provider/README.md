@@ -1,35 +1,58 @@
 # opencode-provider
 
-Provider abstraction and concrete LLM adapters for the Rust workspace.
+Provider abstraction, domain services, and concrete LLM adapters for the Rust workspace.
 
 ## Status
 
-Active. This crate contains real provider implementations and registry logic used by both the manual server harness and the bounded Rust session runtime tool loop.
+Active. This crate now has two responsibilities: runtime model adapters and provider/auth/account parity domain services.
 
 ## What Exists Today
 
-- `LanguageModel` trait
-- `ModelRegistry`
-- auth resolver helpers
-- SSE parsing helpers
-- concrete adapters for OpenAI, Anthropic, and Google
-- tests that exercise registry behavior, provider streaming paths, and tool replay contracts
+- Runtime layer:
+  - `LanguageModel` trait
+  - `ModelRegistry`
+  - SSE parsing helpers
+  - concrete adapters for OpenAI, Anthropic, and Google
+- Provider parity domain layer:
+  - `ProviderCatalogService` (`/api/v1/provider`, `/api/v1/config/providers` data contracts)
+  - `ProviderAuthService` (auth method discovery + authorize/callback handshake)
+  - `AccountService` (persist/list/use/remove provider accounts via storage)
+- tests covering registry behavior, provider streaming paths, catalog filtering/default selection, auth method mapping, OAuth lifecycle, and account-state invariants
 
 ## Current Usage In The Workspace
 
-- `opencode-session` uses these adapters for live session prompts.
-- Anthropic and Google currently support provider-driven tool execution in that session runtime slice.
-- The `opencode` binary also registers providers into a `ModelRegistry` when `OPENCODE_MANUAL_HARNESS=1` is set, and `opencode-server` exposes `POST /api/v1/provider/stream` as a manual validation route.
+- `opencode-session` uses runtime adapters for live model prompts.
+- `opencode-server` uses domain services for public provider/auth/account/config routes.
+- `opencode` startup seeds catalog metadata from cached `.opencode/models.json` when available.
+- `ModelRegistry` registration in `opencode` remains tied to `OPENCODE_MANUAL_HARNESS=1` for raw stream checks.
 
-That harness route is not positioned as a stable public API. It exists to validate real streaming behavior against providers and does not cover the full persisted session loop by itself.
-
-## Supported Providers
+## Supported built-in providers
 
 | Provider id | Current role |
 | --- | --- |
-| `openai` | real adapter, text-only in the current session runtime MVP |
+| `openai` | real adapter, text-only in current session runtime MVP; includes API-key + OAuth method metadata |
 | `anthropic` | real adapter, supports bounded session tool execution |
 | `google` | real adapter, supports bounded session tool execution |
+
+## Public/manual route contract alignment
+
+- Public routes (via `opencode-server`) consume this crate's domain services:
+  - `GET /api/v1/provider`
+  - `GET /api/v1/provider/auth`
+  - `POST /api/v1/provider/:provider/oauth/authorize`
+  - `POST /api/v1/provider/:provider/oauth/callback`
+  - `GET /api/v1/provider/account`
+  - `POST /api/v1/provider/account/use`
+  - `DELETE /api/v1/provider/account/:account_id`
+  - `GET /api/v1/config/providers`
+- Manual-only route remains separate: `POST /api/v1/provider/stream`.
+
+## Persistence behavior
+
+- Account data persists through `opencode-storage` (`account`, `account_state`; `id=1` singleton active state).
+- Callback success is observable by re-reading account state endpoints.
+- Active-account updates are validated against persisted account/org data.
+- Account removal relies on storage cleanup to prevent dangling active references.
 
 ## Tool replay notes
 
@@ -38,7 +61,13 @@ That harness route is not positioned as a stable public API. It exists to valida
 - Google/Gemini `thoughtSignature` is replayed on the enclosing `Part`, not nested inside `functionCall`.
 - Session history stores tool results under runtime `tool` role; the Google adapter normalizes replay to API-compatible `user` role when emitting `functionResponse` parts.
 
-Those details matter for parity with the live Google wire contract even though the persisted runtime history stays provider-agnostic.
+Those details matter for parity with the live Google wire contract even though persisted runtime history stays provider-agnostic.
+
+## Current limitations
+
+- OAuth pending state is in-memory only (restart during flow requires a new authorize call).
+- OpenAI is not tool-capable in the current session runtime path.
+- Catalog startup currently prefers cache overlay and does not force network refresh at boot.
 
 ## Configuration
 

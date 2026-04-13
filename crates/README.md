@@ -16,10 +16,10 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 | [`opencode-lsp`](opencode-lsp) | stub | Placeholder for future LSP integration |
 | [`opencode-mcp`](opencode-mcp) | stub | Placeholder for future MCP integration |
 | [`opencode-plugin`](opencode-plugin) | stub | Placeholder for future plugin hosting |
-| [`opencode-provider`](opencode-provider) | active | Provider registry and OpenAI/Anthropic/Google adapters |
-| [`opencode-server`](opencode-server) | active | Axum router and HTTP endpoints |
+| [`opencode-provider`](opencode-provider) | active | Runtime adapters plus provider catalog/auth/account domain services |
+| [`opencode-server`](opencode-server) | active | Axum router and HTTP endpoints, including provider/config/account routes |
 | [`opencode-session`](opencode-session) | partial | Bounded session runtime loop (`prompt`, `cancel`, history replay, tool persistence, run-state) |
-| [`opencode-storage`](opencode-storage) | active | SQLite persistence and repositories |
+| [`opencode-storage`](opencode-storage) | active | SQLite persistence and repositories including account active-state support |
 | [`opencode-tool`](opencode-tool) | active | Tool runtime, built-in file/shell tools, and provider-facing tool metadata |
 | [`opencode-tui`](opencode-tui) | stub | Placeholder for future terminal UI |
 
@@ -32,6 +32,12 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 Current notable `partial` crate details:
 
 - `opencode-session` now includes the bounded Anthropic/Google runtime tool loop with persisted replay, but broader parity items (OpenAI tool execution, approval flows, richer UI/event contracts) remain deferred.
+
+Current notable `active` crate updates in `v0.8.0`:
+
+- `opencode-provider` now owns provider metadata catalog filtering, auth-method discovery, and account-domain composition.
+- `opencode-server` now exposes public provider/account/config contracts (`/api/v1/provider*`, `/api/v1/config/providers`) alongside the manual stream harness.
+- `opencode-storage` now exposes richer account/account_state helpers used by provider/account services.
 
 ## Build And Test
 

@@ -92,7 +92,7 @@ curl -X POST http://localhost:4141/api/v1/projects/$PID/sessions \
     "slug": "manual-runtime-test",
     "directory": "/home/dannyx/projects/Rust/opencode-rs",
     "title": "Manual runtime test",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "share_url": null,
     "summary_additions": null,
     "summary_deletions": null,
@@ -159,6 +159,27 @@ curl -X POST http://localhost:4141/api/v1/sessions/$SID/cancel
 ## Raw provider harness path
 
 Use this only when you want to validate the provider adapter itself without session persistence.
+
+## Provider/auth/account parity path
+
+These endpoints are public API surface (no harness flag required):
+
+- `GET /api/v1/provider`
+- `GET /api/v1/provider/auth`
+- `POST /api/v1/provider/{provider}/oauth/authorize`
+- `POST /api/v1/provider/{provider}/oauth/callback`
+- `GET /api/v1/provider/account`
+- `POST /api/v1/provider/account/use`
+- `DELETE /api/v1/provider/account/{account_id}`
+- `GET /api/v1/config/providers`
+
+Expected manual flow:
+
+1. Read methods from `/api/v1/provider/auth`.
+2. Start auth via `/oauth/authorize`.
+3. Complete with `/oauth/callback`.
+4. Verify persisted account state and active selection via `/provider/account`.
+5. Optionally switch active account/org and remove account to verify cleanup behavior.
 
 ## Endpoints
 
@@ -277,4 +298,4 @@ requires a real API key and makes live network requests to external providers.
 
 - `POST /api/v1/provider/stream` does **not** exercise session persistence or the runtime tool loop.
 - `POST /api/v1/sessions/:sid/prompt` is the correct path for validating the bounded Anthropic/Google runtime parity work.
-- The current workspace version remains `0.7.0`.
+- The current workspace version remains `0.8.0`.

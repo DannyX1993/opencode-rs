@@ -16,6 +16,8 @@ Active. This crate contains real repositories, migration bootstrap, and the `Sto
 - `Storage` trait used by higher layers
 - `StorageImpl` backed by `sqlx`
 - repositories for projects, sessions, messages, todos, permissions, and accounts
+- singleton `account_state` persistence for active account/org selection
+- legacy `control_account` lookup helpers for compatibility surfaces
 - append-only sync event storage
 
 ## Data Surface
@@ -28,9 +30,20 @@ The `Storage` trait currently supports:
 - todos
 - permissions
 - accounts
+- account active state (`account_state` singleton)
+- legacy control account reads
 - raw sync events
 
 `list_history_with_parts` is the richer message-history API used by the server routes.
+
+## Provider/Auth/Account parity persistence behavior
+
+- `upsert_account` persists or refreshes provider credentials by account id.
+- `set_account_state` writes active account/org selection at singleton row id `1`.
+- `remove_account` clears dangling active state when the removed account was active.
+- Token refresh helpers update access/refresh tokens and expiry without rewriting unrelated fields.
+
+These contracts are consumed by `opencode-provider::AccountService` and surfaced through `opencode-server` provider account routes.
 
 ## Usage
 

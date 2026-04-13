@@ -33,6 +33,14 @@ pub struct Config {
     #[serde(default)]
     pub providers: ProvidersConfig,
 
+    /// Provider ids hidden from public provider/config listings.
+    #[serde(default)]
+    pub disabled_providers: Option<Vec<String>>,
+
+    /// Optional provider allow-list applied to public provider/config listings.
+    #[serde(default)]
+    pub enabled_providers: Option<Vec<String>>,
+
     /// Server / transport settings.
     #[serde(default)]
     pub server: ServerConfig,
@@ -55,6 +63,8 @@ impl Default for Config {
         Self {
             model: None,
             providers: ProvidersConfig::default(),
+            disabled_providers: None,
+            enabled_providers: None,
             server: ServerConfig::default(),
             log_level: default_log_level(),
             log_json: false,
@@ -171,6 +181,12 @@ async fn load_jsonc(path: &Path) -> Result<Config, ConfigError> {
 fn merge(mut a: Config, b: Config) -> Config {
     if b.model.is_some() {
         a.model = b.model;
+    }
+    if b.disabled_providers.is_some() {
+        a.disabled_providers = b.disabled_providers;
+    }
+    if b.enabled_providers.is_some() {
+        a.enabled_providers = b.enabled_providers;
     }
     if b.log_level != "info" {
         a.log_level = b.log_level;
@@ -299,6 +315,24 @@ mod tests {
         assert_eq!(cfg.providers.anthropic.as_deref(), Some("sk-ant-123"));
         assert_eq!(cfg.providers.openai.as_deref(), Some("sk-oai-456"));
         assert_eq!(cfg.providers.google.as_deref(), Some("gk-789"));
+    }
+
+    #[tokio::test]
+    async fn provider_filters_merge_from_local_config() {
+        let dir = TempDir::new().unwrap();
+        let oc = dir.path().join(".opencode");
+        std::fs::create_dir_all(&oc).unwrap();
+        write_jsonc(
+            &oc,
+            "config.jsonc",
+            r#"{ "disabled_providers": ["google"], "enabled_providers": ["openai", "anthropic"] }"#,
+        );
+        let cfg = Config::load(dir.path()).await.unwrap();
+        assert_eq!(cfg.disabled_providers, Some(vec!["google".to_string()]));
+        assert_eq!(
+            cfg.enabled_providers,
+            Some(vec!["openai".to_string(), "anthropic".to_string()])
+        );
     }
 
     #[tokio::test]

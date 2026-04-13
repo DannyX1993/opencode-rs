@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 use crate::{
-    routes::{project, provider, session},
+    routes::{config, project, provider, session},
     state::AppState,
 };
 use opencode_core::error::ServerError;
@@ -37,6 +37,23 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/sessions/{sid}/prompt", post(session::prompt))
         .route("/sessions/{sid}/cancel", post(session::cancel))
+        .route("/provider", get(provider::list))
+        .route("/provider/auth", get(provider::auth_methods))
+        .route(
+            "/provider/{provider}/oauth/authorize",
+            post(provider::oauth_authorize),
+        )
+        .route(
+            "/provider/{provider}/oauth/callback",
+            post(provider::oauth_callback),
+        )
+        .route("/provider/account", get(provider::account_state))
+        .route("/provider/account/use", post(provider::use_account))
+        .route(
+            "/provider/account/{account_id}",
+            axum::routing::delete(provider::remove_account),
+        )
+        .route("/config/providers", get(config::providers))
         // Manual provider harness (Phase 2 — env-gated)
         .route("/provider/stream", post(provider::stream));
 
@@ -80,13 +97,15 @@ mod tests {
     use opencode_core::config::Config;
     use opencode_core::{
         dto::{
-            AccountRow, MessageRow, MessageWithParts, PartRow, PermissionRow, ProjectRow,
-            SessionRow, TodoRow,
+            AccountRow, AccountStateRow, ControlAccountRow, MessageRow, MessageWithParts, PartRow,
+            PermissionRow, ProjectRow, SessionRow, TodoRow,
         },
         error::{SessionError, StorageError},
-        id::{ProjectId, SessionId},
+        id::{AccountId, ProjectId, SessionId},
     };
-    use opencode_provider::ModelRegistry;
+    use opencode_provider::{
+        AccountService, ModelRegistry, ProviderAuthService, ProviderCatalogService,
+    };
     use opencode_session::engine::Session;
     use opencode_session::types::{SessionHandle, SessionPrompt};
     use opencode_storage::Storage;
@@ -156,6 +175,40 @@ mod tests {
         async fn list_accounts(&self) -> Result<Vec<AccountRow>, StorageError> {
             Ok(vec![])
         }
+        async fn get_account(&self, _: AccountId) -> Result<Option<AccountRow>, StorageError> {
+            Ok(None)
+        }
+        async fn remove_account(&self, _: AccountId) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn update_account_tokens(
+            &self,
+            _: AccountId,
+            _: String,
+            _: String,
+            _: Option<i64>,
+            _: i64,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn get_account_state(&self) -> Result<Option<AccountStateRow>, StorageError> {
+            Ok(None)
+        }
+        async fn set_account_state(&self, _: AccountStateRow) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn get_control_account(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<ControlAccountRow>, StorageError> {
+            Ok(None)
+        }
+        async fn get_active_control_account(
+            &self,
+        ) -> Result<Option<ControlAccountRow>, StorageError> {
+            Ok(None)
+        }
         async fn append_event(
             &self,
             _: &str,
@@ -179,12 +232,17 @@ mod tests {
     }
 
     fn state() -> AppState {
+        let storage: Arc<dyn Storage> = Arc::new(StubStorage);
+        let cfg = Config::default();
         AppState {
-            config: Arc::new(Config::default()),
+            config: Arc::new(cfg.clone()),
             bus: Arc::new(BroadcastBus::new(64)),
-            storage: Arc::new(StubStorage),
+            storage: Arc::clone(&storage),
             session: Arc::new(StubSession),
             registry: Arc::new(ModelRegistry::new()),
+            provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
+            provider_auth: Arc::new(ProviderAuthService::new()),
+            provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,
         }
     }

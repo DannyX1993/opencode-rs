@@ -8,6 +8,7 @@
 
 #![warn(missing_docs)]
 
+pub mod account;
 pub mod anthropic;
 pub mod auth;
 pub mod catalog;
@@ -18,9 +19,15 @@ pub mod registry;
 pub mod sse;
 pub mod types;
 
+pub use account::{AccountService, AccountStateDto, PersistAccountInput};
 pub use anthropic::AnthropicProvider;
-pub use auth::{AuthResolver, EnvAuthResolver};
-pub use catalog::CatalogCache;
+pub use auth::{
+    AuthAuthorizationDto, AuthMethodDto, AuthMethodKind, AuthPromptDto, AuthResolver,
+    AuthorizeInput, CallbackInput, EnvAuthResolver, ProviderAuthService,
+};
+pub use catalog::{
+    CatalogCache, ConfigProvidersDto, ProviderCatalogService, ProviderInfoDto, ProviderListDto,
+};
 pub use error::ProviderError;
 pub use google::GoogleProvider;
 pub use openai::OpenAiProvider;

@@ -1,4 +1,9 @@
 //! Model registry — a thread-safe map of provider id → `Arc<dyn LanguageModel>`.
+//!
+//! This registry intentionally remains runtime-only. Provider catalog metadata,
+//! auth methods, and connected-account views live in dedicated provider-domain
+//! services (`catalog`, `auth`, `account`) so HTTP parity endpoints stay
+//! decoupled from streaming model execution concerns.
 
 use crate::error::ProviderError;
 use crate::types::{LanguageModel, ModelInfo};

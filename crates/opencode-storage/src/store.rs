@@ -3,11 +3,11 @@
 use async_trait::async_trait;
 use opencode_core::{
     dto::{
-        AccountRow, MessageRow, MessageWithParts, PartRow, PermissionRow, ProjectRow, SessionRow,
-        TodoRow,
+        AccountRow, AccountStateRow, ControlAccountRow, MessageRow, MessageWithParts, PartRow,
+        PermissionRow, ProjectRow, SessionRow, TodoRow,
     },
     error::StorageError,
-    id::{ProjectId, SessionId},
+    id::{AccountId, ProjectId, SessionId},
 };
 use sqlx::SqlitePool;
 
@@ -83,6 +83,31 @@ pub trait Storage: Send + Sync {
     async fn upsert_account(&self, row: AccountRow) -> Result<(), StorageError>;
     /// List all accounts.
     async fn list_accounts(&self) -> Result<Vec<AccountRow>, StorageError>;
+    /// Fetch one account by id.
+    async fn get_account(&self, id: AccountId) -> Result<Option<AccountRow>, StorageError>;
+    /// Remove an account.
+    async fn remove_account(&self, id: AccountId) -> Result<(), StorageError>;
+    /// Update persisted account tokens.
+    async fn update_account_tokens(
+        &self,
+        id: AccountId,
+        access_token: String,
+        refresh_token: String,
+        token_expiry: Option<i64>,
+        time_updated: i64,
+    ) -> Result<(), StorageError>;
+    /// Read singleton active account state.
+    async fn get_account_state(&self) -> Result<Option<AccountStateRow>, StorageError>;
+    /// Persist singleton active account state.
+    async fn set_account_state(&self, row: AccountStateRow) -> Result<(), StorageError>;
+    /// Lookup a legacy control-account row by email and url.
+    async fn get_control_account(
+        &self,
+        email: &str,
+        url: &str,
+    ) -> Result<Option<ControlAccountRow>, StorageError>;
+    /// Lookup the active legacy control-account row.
+    async fn get_active_control_account(&self) -> Result<Option<ControlAccountRow>, StorageError>;
 
     // ── Events ───────────────────────────────────────────────────────────────
     /// Append a raw sync event; returns the assigned sequence number.
@@ -187,6 +212,46 @@ impl Storage for StorageImpl {
     async fn list_accounts(&self) -> Result<Vec<AccountRow>, StorageError> {
         account::list(&self.pool).await
     }
+    async fn get_account(&self, id: AccountId) -> Result<Option<AccountRow>, StorageError> {
+        account::get(&self.pool, id).await
+    }
+    async fn remove_account(&self, id: AccountId) -> Result<(), StorageError> {
+        account::remove(&self.pool, id).await
+    }
+    async fn update_account_tokens(
+        &self,
+        id: AccountId,
+        access_token: String,
+        refresh_token: String,
+        token_expiry: Option<i64>,
+        time_updated: i64,
+    ) -> Result<(), StorageError> {
+        account::update_tokens(
+            &self.pool,
+            id,
+            &access_token,
+            &refresh_token,
+            token_expiry,
+            time_updated,
+        )
+        .await
+    }
+    async fn get_account_state(&self) -> Result<Option<AccountStateRow>, StorageError> {
+        account::get_state(&self.pool).await
+    }
+    async fn set_account_state(&self, row: AccountStateRow) -> Result<(), StorageError> {
+        account::set_state(&self.pool, &row).await
+    }
+    async fn get_control_account(
+        &self,
+        email: &str,
+        url: &str,
+    ) -> Result<Option<ControlAccountRow>, StorageError> {
+        account::get_control_account(&self.pool, email, url).await
+    }
+    async fn get_active_control_account(&self) -> Result<Option<ControlAccountRow>, StorageError> {
+        account::get_active_control_account(&self.pool).await
+    }
 
     async fn append_event(
         &self,
@@ -202,8 +267,12 @@ impl Storage for StorageImpl {
 mod tests {
     use super::*;
     use crate::pool::connect;
-    use opencode_core::id::{AccountId, MessageId, PartId, ProjectId, SessionId};
+    use opencode_core::{
+        dto::AccountStateRow,
+        id::{AccountId, MessageId, PartId, ProjectId, SessionId},
+    };
     use serde_json::json;
+    use sqlx::Executor;
     use tempfile::NamedTempFile;
 
     async fn make_storage() -> (StorageImpl, NamedTempFile) {
@@ -464,5 +533,99 @@ mod tests {
         let all = s.list_accounts().await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, aid);
+    }
+
+    #[tokio::test]
+    async fn storage_impl_delegates_account_lookup_token_updates_and_state() {
+        let (s, _f) = make_storage().await;
+        let aid = AccountId::new();
+
+        s.upsert_account(acct(aid)).await.unwrap();
+
+        let found = s.get_account(aid).await.unwrap().unwrap();
+        assert_eq!(found.id, aid);
+
+        s.update_account_tokens(aid, "next-token".into(), "next-refresh".into(), Some(9), 5)
+            .await
+            .unwrap();
+        let updated = s.get_account(aid).await.unwrap().unwrap();
+        assert_eq!(updated.access_token, "next-token");
+        assert_eq!(updated.refresh_token, "next-refresh");
+
+        s.set_account_state(AccountStateRow {
+            id: 7,
+            active_account_id: Some(aid),
+            active_org_id: Some("org-live".into()),
+        })
+        .await
+        .unwrap();
+        let state = s.get_account_state().await.unwrap().unwrap();
+        assert_eq!(state.id, 1);
+        assert_eq!(state.active_account_id, Some(aid));
+        assert_eq!(state.active_org_id.as_deref(), Some("org-live"));
+    }
+
+    #[tokio::test]
+    async fn storage_impl_remove_account_clears_singleton_state() {
+        let (s, _f) = make_storage().await;
+        let aid = AccountId::new();
+
+        s.upsert_account(acct(aid)).await.unwrap();
+        s.set_account_state(AccountStateRow {
+            id: 1,
+            active_account_id: Some(aid),
+            active_org_id: Some("org-stale".into()),
+        })
+        .await
+        .unwrap();
+
+        s.remove_account(aid).await.unwrap();
+
+        assert!(s.get_account(aid).await.unwrap().is_none());
+        let state = s.get_account_state().await.unwrap().unwrap();
+        assert_eq!(state.active_account_id, None);
+        assert_eq!(state.active_org_id, None);
+    }
+
+    #[tokio::test]
+    async fn storage_impl_reads_legacy_control_accounts() {
+        let (s, _f) = make_storage().await;
+
+        s.pool
+            .execute(
+                sqlx::query(
+                    "INSERT INTO control_account (email, url, access_token, refresh_token, token_expiry, active, time_created, time_updated)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind("legacy@test.com")
+                .bind("https://legacy.example.com")
+                .bind("legacy-access")
+                .bind("legacy-refresh")
+                .bind(Option::<i64>::Some(1))
+                .bind(false)
+                .bind(1_i64)
+                .bind(1_i64)
+                .bind("active@test.com")
+                .bind("https://active.example.com")
+                .bind("active-access")
+                .bind("active-refresh")
+                .bind(Option::<i64>::Some(2))
+                .bind(true)
+                .bind(2_i64)
+                .bind(3_i64),
+            )
+            .await
+            .unwrap();
+
+        let exact = s
+            .get_control_account("legacy@test.com", "https://legacy.example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact.email, "legacy@test.com");
+
+        let active = s.get_active_control_account().await.unwrap().unwrap();
+        assert_eq!(active.email, "active@test.com");
+        assert!(active.active);
     }
 }

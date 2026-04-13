@@ -13,6 +13,7 @@ Active. This crate provides foundational code used across the current binary, se
 - cascading JSONC config loading
 - typed IDs
 - DTOs shared between storage and HTTP layers
+- provider/account parity DTOs (account state rows, control-account compatibility, account/org response DTOs)
 - workspace error types
 - tracing bootstrap helpers
 - async context helpers and boxed stream aliases
@@ -32,7 +33,12 @@ Environment support includes keys such as `OPENCODE_MODEL`, `OPENCODE_LOG_LEVEL`
 - `opencode-cli` uses config and tracing bootstrap
 - `opencode-server` uses shared DTOs and typed errors
 - `opencode-storage` uses DTOs and typed IDs for persistence contracts
-- `opencode-provider` uses shared streaming and error-adjacent types
+- `opencode-provider` uses shared streaming and provider/account-domain DTO contracts
+
+## Provider/Auth/Account parity note
+
+`opencode-core` now carries the shared account-state DTO boundary used across storage (`opencode-storage`), domain services (`opencode-provider`), and HTTP routes (`opencode-server`).
+This keeps provider/account payloads stable and transport-neutral while preserving legacy `control_account` compatibility.
 
 ## Test
 

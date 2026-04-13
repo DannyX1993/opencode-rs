@@ -2,7 +2,9 @@
 
 use crate::error::ProviderError;
 use crate::types::ModelInfo;
+use opencode_core::config::Config;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -48,6 +50,302 @@ pub struct CatalogCache {
     client: reqwest::Client,
 }
 
+/// Provider metadata exposed by provider/config endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderInfoDto {
+    /// Provider identifier.
+    pub id: String,
+    /// Human-readable provider name.
+    pub name: String,
+    /// Provider model catalog keyed by model id.
+    pub models: BTreeMap<String, ModelInfo>,
+}
+
+/// Provider catalog response for `/api/v1/provider`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderListDto {
+    /// All providers visible under config filters.
+    pub all: Vec<ProviderInfoDto>,
+    /// Default model id per visible provider.
+    pub default: BTreeMap<String, String>,
+    /// Provider ids that currently have configured connectivity.
+    pub connected: Vec<String>,
+}
+
+/// Provider catalog response for `/api/v1/config/providers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigProvidersDto {
+    /// Providers that are both visible and connected.
+    pub providers: Vec<ProviderInfoDto>,
+    /// Default model id per connected provider.
+    pub default: BTreeMap<String, String>,
+}
+
+/// Builds provider metadata independently from runtime model execution.
+pub struct ProviderCatalogService {
+    cfg: Config,
+    providers: Vec<ProviderInfoDto>,
+}
+
+impl ProviderCatalogService {
+    /// Create a catalog service for the provided config.
+    #[must_use]
+    pub fn new(cfg: Config) -> Self {
+        Self {
+            cfg,
+            providers: builtin_providers(),
+        }
+    }
+
+    /// Create a catalog service that overlays provider models from cached
+    /// `models.dev` entries when available.
+    #[must_use]
+    pub fn new_with_models(cfg: Config, models: Vec<ModelInfo>) -> Self {
+        let mut providers: BTreeMap<String, ProviderInfoDto> = builtin_providers()
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect();
+
+        for (id, entries) in providers_from_models(models) {
+            let name = providers
+                .get(&id)
+                .map(|item| item.name.clone())
+                .unwrap_or_else(|| provider_name(&id));
+            providers.insert(
+                id.clone(),
+                ProviderInfoDto {
+                    id,
+                    name,
+                    models: entries,
+                },
+            );
+        }
+
+        Self {
+            cfg,
+            providers: providers.into_values().collect(),
+        }
+    }
+
+    /// Return all visible providers plus defaults and connectivity.
+    pub fn list(&self) -> Result<ProviderListDto, ProviderError> {
+        let all = self.visible_providers();
+        let connected = self.connected_ids(&all);
+        Ok(ProviderListDto {
+            default: defaults(&all)?,
+            all,
+            connected,
+        })
+    }
+
+    /// Return only connected providers plus defaults.
+    pub fn config_providers(&self) -> Result<ConfigProvidersDto, ProviderError> {
+        let all = self.visible_providers();
+        let connected = self.connected_ids(&all);
+        let providers: Vec<_> = all
+            .into_iter()
+            .filter(|item| connected.binary_search(&item.id).is_ok())
+            .collect();
+        Ok(ConfigProvidersDto {
+            default: defaults(&providers)?,
+            providers,
+        })
+    }
+
+    fn visible_providers(&self) -> Vec<ProviderInfoDto> {
+        let enabled = self.cfg.enabled_providers.as_ref();
+        let disabled = self.cfg.disabled_providers.as_ref();
+        self.providers
+            .iter()
+            .filter(|item| {
+                enabled.is_none_or(|allowed| allowed.iter().any(|id| id == &item.id))
+                    && disabled.is_none_or(|blocked| blocked.iter().all(|id| id != &item.id))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn connected_ids(&self, providers: &[ProviderInfoDto]) -> Vec<String> {
+        let mut ids: Vec<_> = providers
+            .iter()
+            .filter_map(|item| match item.id.as_str() {
+                "anthropic"
+                    if self
+                        .cfg
+                        .providers
+                        .anthropic
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty()) =>
+                {
+                    Some(item.id.clone())
+                }
+                "openai"
+                    if self
+                        .cfg
+                        .providers
+                        .openai
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty()) =>
+                {
+                    Some(item.id.clone())
+                }
+                "google"
+                    if self
+                        .cfg
+                        .providers
+                        .google
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty()) =>
+                {
+                    Some(item.id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+}
+
+fn defaults(providers: &[ProviderInfoDto]) -> Result<BTreeMap<String, String>, ProviderError> {
+    providers
+        .iter()
+        .map(|item| {
+            let default = sort_models(item.models.values().cloned().collect())
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    ProviderError::Http(item.id.clone(), "provider has no available models".into())
+                })?;
+            Ok((item.id.clone(), default.id))
+        })
+        .collect()
+}
+
+fn sort_models(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    const PRIORITY: [&str; 4] = ["gpt-5", "claude-sonnet-4", "big-pickle", "gemini-3-pro"];
+
+    models.sort_by(|left, right| {
+        let left_rank = PRIORITY
+            .iter()
+            .position(|needle| left.id.contains(needle))
+            .map_or(-1_i32, |idx| (PRIORITY.len() - idx) as i32);
+        let right_rank = PRIORITY
+            .iter()
+            .position(|needle| right.id.contains(needle))
+            .map_or(-1_i32, |idx| (PRIORITY.len() - idx) as i32);
+
+        right_rank
+            .cmp(&left_rank)
+            .then_with(|| left.id.contains("latest").cmp(&right.id.contains("latest")))
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    models
+}
+
+fn builtin_providers() -> Vec<ProviderInfoDto> {
+    [anthropic(), google(), openai()].into_iter().collect()
+}
+
+fn anthropic() -> ProviderInfoDto {
+    ProviderInfoDto {
+        id: "anthropic".into(),
+        name: "Anthropic".into(),
+        models: [
+            model(
+                "claude-sonnet-4-5",
+                "Claude Sonnet 4.5",
+                200_000,
+                8_192,
+                true,
+            ),
+            model("claude-3-5-haiku", "Claude 3.5 Haiku", 200_000, 8_192, true),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
+fn openai() -> ProviderInfoDto {
+    ProviderInfoDto {
+        id: "openai".into(),
+        name: "OpenAI".into(),
+        models: [
+            model("gpt-5", "GPT-5", 200_000, 8_192, true),
+            model("gpt-4o", "GPT-4o", 128_000, 4_096, true),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
+fn google() -> ProviderInfoDto {
+    ProviderInfoDto {
+        id: "google".into(),
+        name: "Google".into(),
+        models: [
+            model("gemini-3-pro", "Gemini 3 Pro", 1_000_000, 8_192, true),
+            model(
+                "gemini-2.0-flash",
+                "Gemini 2.0 Flash",
+                1_000_000,
+                8_192,
+                true,
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
+fn model(
+    id: &str,
+    name: &str,
+    context_window: u32,
+    max_output: u32,
+    vision: bool,
+) -> (String, ModelInfo) {
+    (
+        id.into(),
+        ModelInfo {
+            id: id.into(),
+            name: name.into(),
+            context_window,
+            max_output,
+            vision,
+        },
+    )
+}
+
+fn providers_from_models(models: Vec<ModelInfo>) -> BTreeMap<String, BTreeMap<String, ModelInfo>> {
+    models
+        .into_iter()
+        .fold(BTreeMap::new(), |mut acc, mut model| {
+            let raw_id = model.id.clone();
+            let Some((provider, model_id)) = raw_id.split_once('/') else {
+                return acc;
+            };
+            if provider.is_empty() || model_id.is_empty() {
+                acc
+            } else {
+                model.id = model_id.to_string();
+                acc.entry(provider.to_string())
+                    .or_insert_with(BTreeMap::new)
+                    .insert(model.id.clone(), model);
+                acc
+            }
+        })
+}
+
+fn provider_name(id: &str) -> String {
+    match id {
+        "openai" => "OpenAI".into(),
+        "anthropic" => "Anthropic".into(),
+        "google" => "Google".into(),
+        _ => id.to_string(),
+    }
+}
+
 impl CatalogCache {
     /// Create a new cache backed by `path`, fetching from `url` with default TTL.
     pub fn new(path: impl Into<PathBuf>, url: impl Into<String>) -> Self {
@@ -84,6 +382,16 @@ impl CatalogCache {
         let fresh = self.fetch().await?;
         self.write_cache(&fresh)?;
         Ok(fresh)
+    }
+
+    /// Load models from the on-disk cache only.
+    ///
+    /// Returns `Ok(None)` when the cache file does not exist.
+    pub fn load_cached(&self) -> Result<Option<Vec<ModelInfo>>, ProviderError> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        self.read_cache().map(Some)
     }
 
     fn is_fresh(&self) -> bool {
@@ -151,6 +459,7 @@ impl CatalogCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencode_core::config::Config;
     use std::time::Duration;
     use tempfile::tempdir;
     use wiremock::{
@@ -291,5 +600,110 @@ mod tests {
         let cache = CatalogCache::new(&p, srv.uri());
         let models = cache.load(true).await.unwrap();
         assert_eq!(models.len(), 2);
+    }
+
+    #[test]
+    fn provider_catalog_filters_enabled_and_disabled_providers() {
+        let cfg = Config {
+            enabled_providers: Some(vec!["openai".into(), "google".into()]),
+            disabled_providers: Some(vec!["google".into()]),
+            ..Config::default()
+        };
+
+        let catalog = ProviderCatalogService::new(cfg);
+        let listed = catalog.list().unwrap();
+
+        let ids: Vec<_> = listed.all.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["openai"]);
+        assert!(listed.default.contains_key("openai"));
+        assert!(!listed.default.contains_key("google"));
+    }
+
+    #[test]
+    fn provider_catalog_reports_connected_providers_from_configured_keys() {
+        let cfg = Config {
+            providers: opencode_core::config::ProvidersConfig {
+                openai: Some("sk-openai".into()),
+                google: Some("google-key".into()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+
+        let catalog = ProviderCatalogService::new(cfg);
+        let listed = catalog.list().unwrap();
+
+        assert_eq!(
+            listed.connected,
+            vec!["google".to_string(), "openai".to_string()]
+        );
+    }
+
+    #[test]
+    fn provider_catalog_uses_sorted_model_defaults_per_provider() {
+        let catalog = ProviderCatalogService::new(Config::default());
+        let listed = catalog.list().unwrap();
+
+        assert_eq!(
+            listed.default.get("anthropic"),
+            Some(&"claude-sonnet-4-5".to_string())
+        );
+        assert_eq!(listed.default.get("openai"), Some(&"gpt-5".to_string()));
+        assert_eq!(
+            listed.default.get("google"),
+            Some(&"gemini-3-pro".to_string())
+        );
+    }
+
+    #[test]
+    fn config_provider_catalog_only_includes_connected_entries() {
+        let cfg = Config {
+            providers: opencode_core::config::ProvidersConfig {
+                anthropic: Some("sk-anthropic".into()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+
+        let catalog = ProviderCatalogService::new(cfg);
+        let listed = catalog.config_providers().unwrap();
+
+        assert_eq!(listed.providers.len(), 1);
+        assert_eq!(listed.providers[0].id, "anthropic");
+        assert_eq!(
+            listed.default.get("anthropic"),
+            Some(&"claude-sonnet-4-5".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_catalog_can_overlay_models_from_cache_entries() {
+        let cfg = Config {
+            providers: opencode_core::config::ProvidersConfig {
+                openai: Some("sk-openai".into()),
+                ..Default::default()
+            },
+            enabled_providers: Some(vec!["openai".into()]),
+            ..Config::default()
+        };
+
+        let catalog = ProviderCatalogService::new_with_models(
+            cfg,
+            vec![ModelInfo {
+                id: "openai/gpt-cache-only".into(),
+                name: "Cached model".into(),
+                context_window: 32_768,
+                max_output: 2_048,
+                vision: true,
+            }],
+        );
+        let listed = catalog.config_providers().unwrap();
+
+        assert_eq!(listed.providers.len(), 1);
+        assert_eq!(listed.providers[0].id, "openai");
+        assert_eq!(
+            listed.default.get("openai"),
+            Some(&"gpt-cache-only".to_string())
+        );
     }
 }

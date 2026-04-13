@@ -63,7 +63,8 @@ pub async fn dispatch(cli: Cli, cwd: &Path) -> Result<()> {
 pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
     use opencode_bus::BroadcastBus;
     use opencode_provider::{
-        AnthropicProvider, EnvAuthResolver, GoogleProvider, ModelRegistry, OpenAiProvider,
+        AccountService, AnthropicProvider, CatalogCache, EnvAuthResolver, GoogleProvider,
+        ModelRegistry, OpenAiProvider, ProviderAuthService, ProviderCatalogService,
     };
     use opencode_server::{AppState, build, serve};
     use opencode_session::engine::SessionEngine;
@@ -105,6 +106,14 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
         Arc::clone(&registry),
         default_model,
     ));
+    let models = CatalogCache::default_url(cwd.join(".opencode/models.json"))
+        .load_cached()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let provider_catalog = Arc::new(ProviderCatalogService::new_with_models(cfg.clone(), models));
+    let provider_auth = Arc::new(ProviderAuthService::new());
+    let provider_accounts = Arc::new(AccountService::new(Arc::clone(&storage)));
 
     let state = AppState {
         config: Arc::new(cfg),
@@ -112,6 +121,9 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
         storage,
         session,
         registry,
+        provider_catalog,
+        provider_auth,
+        provider_accounts,
         harness,
     };
 
@@ -281,6 +293,127 @@ mod tests {
             err.contains(&sid.to_string()),
             "expected runtime not-found to include session id, got: {err}"
         );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_server_exposes_provider_and_config_catalog_routes() {
+        use reqwest::StatusCode;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".opencode")).unwrap();
+        std::fs::write(
+            dir.path().join(".opencode/config.jsonc"),
+            r#"{
+                "providers": { "openai": "sk-openai" },
+                "enabled_providers": ["openai", "google"],
+                "disabled_providers": ["google"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".opencode/models.json"),
+            r#"[
+                {
+                    "id": "openai/gpt-cache-only",
+                    "name": "Cached OpenAI",
+                    "context": 32768,
+                    "max_tokens": 2048,
+                    "vision": true,
+                    "attachment": false
+                }
+            ]"#,
+        )
+        .unwrap();
+        let path = dir.path().to_path_buf();
+        let handle = tokio::spawn(async move {
+            start_server(&path, port).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let cli = reqwest::Client::new();
+        let provider_resp = cli
+            .get(format!("http://127.0.0.1:{port}/api/v1/provider"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(provider_resp.status(), StatusCode::OK);
+        let provider_json: serde_json::Value = provider_resp.json().await.unwrap();
+        assert_eq!(provider_json["all"].as_array().unwrap().len(), 1);
+        assert_eq!(provider_json["all"][0]["id"], "openai");
+        assert_eq!(provider_json["connected"], serde_json::json!(["openai"]));
+
+        let config_resp = cli
+            .get(format!("http://127.0.0.1:{port}/api/v1/config/providers"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(config_resp.status(), StatusCode::OK);
+        let config_json: serde_json::Value = config_resp.json().await.unwrap();
+        assert_eq!(config_json["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(config_json["providers"][0]["id"], "openai");
+        assert_eq!(config_json["default"]["openai"], "gpt-cache-only");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_server_persists_callback_state_across_provider_requests() {
+        use reqwest::StatusCode;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let handle = tokio::spawn(async move {
+            start_server(&path, port).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let cli = reqwest::Client::new();
+        let authorize_resp = cli
+            .post(format!(
+                "http://127.0.0.1:{port}/api/v1/provider/openai/oauth/authorize"
+            ))
+            .json(&serde_json::json!({ "method": 1 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authorize_resp.status(), StatusCode::OK);
+
+        let callback_resp = cli
+            .post(format!(
+                "http://127.0.0.1:{port}/api/v1/provider/openai/oauth/callback"
+            ))
+            .json(&serde_json::json!({
+                "method": 1,
+                "code": "oauth-code"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(callback_resp.status(), StatusCode::OK);
+
+        let state_resp = cli
+            .get(format!("http://127.0.0.1:{port}/api/v1/provider/account"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(state_resp.status(), StatusCode::OK);
+        let state_json: serde_json::Value = state_resp.json().await.unwrap();
+        assert_eq!(state_json["accounts"].as_array().unwrap().len(), 1);
+        assert!(state_json["active"]["account_id"].is_string());
 
         handle.abort();
     }

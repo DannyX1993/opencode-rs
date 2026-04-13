@@ -407,10 +407,14 @@ mod tests {
     use opencode_bus::BroadcastBus;
     use opencode_core::{
         config::Config,
-        dto::{AccountRow, MessageRow, PermissionRow, ProjectRow, TodoRow},
+        dto::{
+            AccountRow, AccountStateRow, ControlAccountRow, MessageRow, PermissionRow, ProjectRow,
+            TodoRow,
+        },
         error::{SessionError, StorageError},
-        id::{MessageId, PartId, ProjectId, SessionId},
+        id::{AccountId, MessageId, PartId, ProjectId, SessionId},
     };
+    use opencode_provider::{AccountService, ProviderAuthService, ProviderCatalogService};
     use opencode_session::{
         engine::Session,
         types::{SessionHandle, SessionPrompt},
@@ -523,6 +527,40 @@ mod tests {
         async fn list_accounts(&self) -> Result<Vec<AccountRow>, StorageError> {
             Ok(vec![])
         }
+        async fn get_account(&self, _: AccountId) -> Result<Option<AccountRow>, StorageError> {
+            Ok(None)
+        }
+        async fn remove_account(&self, _: AccountId) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn update_account_tokens(
+            &self,
+            _: AccountId,
+            _: String,
+            _: String,
+            _: Option<i64>,
+            _: i64,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn get_account_state(&self) -> Result<Option<AccountStateRow>, StorageError> {
+            Ok(None)
+        }
+        async fn set_account_state(&self, _: AccountStateRow) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn get_control_account(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<ControlAccountRow>, StorageError> {
+            Ok(None)
+        }
+        async fn get_active_control_account(
+            &self,
+        ) -> Result<Option<ControlAccountRow>, StorageError> {
+            Ok(None)
+        }
         async fn append_event(
             &self,
             _: &str,
@@ -591,12 +629,17 @@ mod tests {
     }
 
     fn app_with_session(stub: Stub, session: Arc<dyn Session>) -> Router {
+        let storage: Arc<dyn Storage> = Arc::new(stub);
+        let cfg = Config::default();
         let state = crate::state::AppState {
-            config: Arc::new(Config::default()),
+            config: Arc::new(cfg.clone()),
             bus: Arc::new(BroadcastBus::new(64)),
-            storage: Arc::new(stub),
+            storage: Arc::clone(&storage),
             session,
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
+            provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
+            provider_auth: Arc::new(ProviderAuthService::new()),
+            provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,
         };
         crate::router::build(state)
@@ -608,12 +651,17 @@ mod tests {
     }
 
     fn app_arc_with_session(stub: Arc<Stub>, session: Arc<dyn Session>) -> Router {
+        let storage: Arc<dyn Storage> = stub;
+        let cfg = Config::default();
         let state = crate::state::AppState {
-            config: Arc::new(Config::default()),
+            config: Arc::new(cfg.clone()),
             bus: Arc::new(BroadcastBus::new(64)),
-            storage: stub,
+            storage: Arc::clone(&storage),
             session,
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
+            provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
+            provider_auth: Arc::new(ProviderAuthService::new()),
+            provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,
         };
         crate::router::build(state)

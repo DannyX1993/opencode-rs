@@ -22,6 +22,14 @@ Active. The crate has real routes, router tests, and is used by `cargo run -p op
 | `POST` | `/api/v1/sessions/{sid}/messages` | appends a message and parts |
 | `POST` | `/api/v1/sessions/{sid}/prompt` | starts a runtime prompt turn via `opencode-session`, including bounded Anthropic/Google tool loops |
 | `POST` | `/api/v1/sessions/{sid}/cancel` | cancels active prompt turn for that session |
+| `GET` | `/api/v1/provider` | returns visible provider catalog + defaults + connected providers |
+| `GET` | `/api/v1/provider/auth` | returns supported auth methods per built-in provider |
+| `POST` | `/api/v1/provider/{provider}/oauth/authorize` | starts OAuth/device-style handoff for supported methods |
+| `POST` | `/api/v1/provider/{provider}/oauth/callback` | completes callback and persists account state on success |
+| `GET` | `/api/v1/provider/account` | returns persisted accounts + active account/org state |
+| `POST` | `/api/v1/provider/account/use` | sets active account and optional active org |
+| `DELETE` | `/api/v1/provider/account/{account_id}` | removes persisted account and clears invalid active state |
+| `GET` | `/api/v1/config/providers` | returns connected provider subset + defaults |
 | `POST` | `/api/v1/provider/stream` | manual SSE harness, only when enabled |
 
 ## Important Limitations
@@ -30,7 +38,21 @@ Active. The crate has real routes, router tests, and is used by `cargo run -p op
 - The session engine now covers a bounded runtime tool loop for Anthropic/Google, but full runtime parity is not complete.
 - `/api/v1/provider/stream` is a raw provider harness; it does not create sessions, persist history, or exercise the session replay loop by itself.
 - OpenAI remains available through the provider layer and harness, but not as a tool-capable session-runtime provider in this MVP.
+- OAuth pending authorization state is in-process (not durable across server restarts).
 - This crate does not currently expose a complete public API contract for all future agent features.
+
+## Public vs manual provider routes
+
+- Public parity routes: `/api/v1/provider*` and `/api/v1/config/providers`.
+- Manual harness route: `/api/v1/provider/stream` (env-gated, diagnostics only).
+
+## Manual validation expectations for parity routes
+
+1. Call `GET /api/v1/provider/auth` to discover available methods.
+2. Start with `POST /api/v1/provider/{provider}/oauth/authorize`.
+3. Complete with `POST /api/v1/provider/{provider}/oauth/callback`.
+4. Validate persistence using `GET /api/v1/provider/account`.
+5. Validate state mutation with `/api/v1/provider/account/use` and account deletion.
 
 ## Manual session-runtime path
 

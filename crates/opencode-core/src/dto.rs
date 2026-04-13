@@ -205,6 +205,71 @@ pub struct AccountRow {
     pub time_updated: i64,
 }
 
+/// Singleton row from the `account_state` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountStateRow {
+    /// Singleton row id. Storage currently normalizes this to `1`.
+    pub id: i64,
+    /// Active account selection.
+    #[serde(default)]
+    pub active_account_id: Option<AccountId>,
+    /// Active organization selection for the active account.
+    #[serde(default)]
+    pub active_org_id: Option<String>,
+}
+
+/// Legacy row from the `control_account` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlAccountRow {
+    /// Account email address.
+    pub email: String,
+    /// Provider portal URL.
+    pub url: String,
+    /// OAuth access token.
+    pub access_token: String,
+    /// OAuth refresh token.
+    pub refresh_token: String,
+    /// Token expiry unix timestamp (ms).
+    #[serde(default)]
+    pub token_expiry: Option<i64>,
+    /// Legacy active flag.
+    pub active: bool,
+    /// Unix timestamp (ms) of creation.
+    pub time_created: i64,
+    /// Unix timestamp (ms) of last update.
+    pub time_updated: i64,
+}
+
+/// Response-neutral account descriptor shared across services.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountInfoDto {
+    /// Account identifier.
+    pub id: AccountId,
+    /// Account email address.
+    pub email: String,
+    /// Provider portal URL.
+    pub url: String,
+}
+
+/// Response-neutral active account selection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveAccountDto {
+    /// Active account identifier.
+    pub account_id: AccountId,
+    /// Active organization identifier, when selected.
+    #[serde(default)]
+    pub active_org_id: Option<String>,
+}
+
+/// Response-neutral organization descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrganizationDto {
+    /// Organization identifier.
+    pub id: String,
+    /// Human-readable organization name.
+    pub name: String,
+}
+
 // ─── Permission ──────────────────────────────────────────────────────────────
 
 /// Row from the `permission` table.
@@ -237,6 +302,7 @@ pub struct MessageWithParts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::id::AccountId;
 
     #[test]
     fn project_row_round_trips() {
@@ -273,6 +339,85 @@ mod tests {
         let json = serde_json::to_value(&row).unwrap();
         let back: TodoRow = serde_json::from_value(json).unwrap();
         assert_eq!(row.content, back.content);
+    }
+
+    #[test]
+    fn account_state_row_round_trips_with_active_selection() {
+        let row = AccountStateRow {
+            id: 1,
+            active_account_id: Some(AccountId::new()),
+            active_org_id: Some("org-primary".to_string()),
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        let back: AccountStateRow = serde_json::from_value(json).unwrap();
+        assert_eq!(row.id, back.id);
+        assert_eq!(row.active_account_id, back.active_account_id);
+        assert_eq!(row.active_org_id, back.active_org_id);
+    }
+
+    #[test]
+    fn account_state_row_round_trips_without_active_selection() {
+        let row = AccountStateRow {
+            id: 1,
+            active_account_id: None,
+            active_org_id: None,
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        let back: AccountStateRow = serde_json::from_value(json).unwrap();
+        assert_eq!(back.active_account_id, None);
+        assert_eq!(back.active_org_id, None);
+    }
+
+    #[test]
+    fn control_account_row_round_trips() {
+        let row = ControlAccountRow {
+            email: "legacy@example.com".to_string(),
+            url: "https://legacy.example.com".to_string(),
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            token_expiry: Some(1_700_000_000_000),
+            active: true,
+            time_created: 1_700_000_000_001,
+            time_updated: 1_700_000_000_002,
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        let back: ControlAccountRow = serde_json::from_value(json).unwrap();
+        assert_eq!(row.email, back.email);
+        assert!(back.active);
+    }
+
+    #[test]
+    fn account_info_dto_round_trips() {
+        let dto = AccountInfoDto {
+            id: AccountId::new(),
+            email: "user@example.com".to_string(),
+            url: "https://provider.example.com".to_string(),
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        let back: AccountInfoDto = serde_json::from_value(json).unwrap();
+        assert_eq!(dto.id, back.id);
+        assert_eq!(dto.email, back.email);
+    }
+
+    #[test]
+    fn active_account_and_org_dtos_round_trip() {
+        let active = ActiveAccountDto {
+            account_id: AccountId::new(),
+            active_org_id: Some("org-123".to_string()),
+        };
+        let org = OrganizationDto {
+            id: "org-123".to_string(),
+            name: "Primary Org".to_string(),
+        };
+
+        let active_back: ActiveAccountDto =
+            serde_json::from_value(serde_json::to_value(&active).unwrap()).unwrap();
+        let org_back: OrganizationDto =
+            serde_json::from_value(serde_json::to_value(&org).unwrap()).unwrap();
+
+        assert_eq!(active.account_id, active_back.account_id);
+        assert_eq!(active.active_org_id, active_back.active_org_id);
+        assert_eq!(org.name, org_back.name);
     }
 
     // ── Task 3.1: MessageWithParts composite DTO ─────────────────────────────

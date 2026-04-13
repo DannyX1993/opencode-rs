@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 opencode-core = { workspace = true }
 opencode-bus  = { workspace = true }
+opencode-storage = { workspace = true }
 async-trait   = { workspace = true }
 tokio         = { workspace = true }
 tokio-stream  = { workspace = true }

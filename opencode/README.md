@@ -26,6 +26,8 @@ This crate is the runnable entrypoint for the workspace. It keeps `src/main.rs` 
 - Standard providers are registered for the harness only when that environment variable is set.
 - Server startup wires `SessionEngine` from `opencode-session`, so session prompt/cancel APIs are runtime-backed.
 - Anthropic and Google session turns can execute the bounded Rust built-in tool loop during `POST /api/v1/sessions/:sid/prompt`.
+- Server startup also wires provider parity services (`ProviderCatalogService`, `ProviderAuthService`, `AccountService`) into `opencode-server` app state.
+- Provider catalog startup overlays model metadata from `.opencode/models.json` when present.
 
 ## Session Runtime Surface
 
@@ -36,11 +38,29 @@ Even though the CLI `prompt` command is still stubbed, server mode exposes the r
 
 These routes are served by `opencode-server` and call into `opencode-session::engine::SessionEngine`.
 
+## Provider/Auth/Account parity surface
+
+`server` mode now exposes public provider/account/config routes:
+
+- `GET /api/v1/provider`
+- `GET /api/v1/provider/auth`
+- `POST /api/v1/provider/:provider/oauth/authorize`
+- `POST /api/v1/provider/:provider/oauth/callback`
+- `GET /api/v1/provider/account`
+- `POST /api/v1/provider/account/use`
+- `DELETE /api/v1/provider/account/:account_id`
+- `GET /api/v1/config/providers`
+
+Manual-only route (diagnostics):
+
+- `POST /api/v1/provider/stream` (requires `OPENCODE_MANUAL_HARNESS=1`)
+
 Important distinction:
 
 - `opencode tool ...` is standalone tool execution.
 - Session prompt flow lives behind the HTTP API today.
 - The manual `/api/v1/provider/stream` harness is only for raw provider streaming checks; it does not exercise the persisted session tool loop.
+- OAuth pending authorize/callback state is currently process-local; restarts during login require re-authorization.
 
 ## Run
 
