@@ -62,7 +62,7 @@ mod tests {
     use opencode_provider::{AccountService, ProviderAuthService, ProviderCatalogService};
     use opencode_session::{
         engine::Session,
-        types::{SessionHandle, SessionPrompt},
+        types::{DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus},
     };
     use opencode_storage::Storage;
     use std::sync::{Arc, Mutex};
@@ -216,14 +216,29 @@ mod tests {
         async fn cancel(&self, _: SessionId) -> Result<(), SessionError> {
             Err(SessionError::NotFound("stub".into()))
         }
+        async fn prompt_detached(
+            &self,
+            _: SessionPrompt,
+        ) -> Result<DetachedPromptAccepted, SessionError> {
+            Err(SessionError::NotFound("stub".into()))
+        }
+        async fn status(&self, _: SessionId) -> Result<SessionRuntimeStatus, SessionError> {
+            Err(SessionError::NotFound("stub".into()))
+        }
+        async fn list_statuses(
+            &self,
+        ) -> Result<std::collections::HashMap<SessionId, SessionRuntimeStatus>, SessionError>
+        {
+            Ok(std::collections::HashMap::new())
+        }
     }
 
-    fn app(stub: Stub) -> Router {
-        let storage: Arc<dyn Storage> = Arc::new(stub);
+    fn app_with_storage(storage: Arc<dyn Storage>) -> Router {
         let cfg = Config::default();
         let state = AppState {
             config: Arc::new(cfg.clone()),
             bus: Arc::new(BroadcastBus::new(64)),
+            event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session: Arc::new(StubSession),
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
@@ -233,6 +248,11 @@ mod tests {
             harness: false,
         };
         crate::router::build(state)
+    }
+
+    fn app(stub: Stub) -> Router {
+        let storage: Arc<dyn Storage> = Arc::new(stub);
+        app_with_storage(storage)
     }
 
     fn proj(id: ProjectId) -> ProjectRow {
@@ -309,6 +329,30 @@ mod tests {
             .unwrap();
         let resp = app(Stub::default()).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn upsert_project_path_id_overrides_payload_id() {
+        let stub = Arc::new(Stub::default());
+        let path_id = ProjectId::new();
+        let payload_id = ProjectId::new();
+        let body = serde_json::to_vec(&proj(payload_id)).unwrap();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/v1/projects/{path_id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+
+        let storage: Arc<dyn Storage> = stub.clone();
+        let resp = app_with_storage(storage).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let projects = stub.projects.lock().unwrap();
+        assert_eq!(projects.len(), 1);
+        let row = &projects[0];
+        assert_eq!(row.id, path_id);
+        assert_ne!(row.id, payload_id);
     }
 
     // ── Task 5.4: GET /api/v1/projects/:id not found returns 404 ─────────────
@@ -398,5 +442,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn stub_session_trait_alignment_behaviors_are_deterministic() {
+        let session = StubSession;
+        let session_id = SessionId::new();
+
+        let prompt_error = session
+            .prompt(SessionPrompt {
+                session_id,
+                text: "hello".into(),
+                model: None,
+                plan_mode: false,
+            })
+            .await
+            .expect_err("stub prompt should stay unavailable");
+        assert!(matches!(prompt_error, SessionError::NotFound(_)));
+
+        let detached_error = session
+            .prompt_detached(SessionPrompt {
+                session_id,
+                text: "hello".into(),
+                model: Some("model".into()),
+                plan_mode: true,
+            })
+            .await
+            .expect_err("stub detached prompt should stay unavailable");
+        assert!(matches!(detached_error, SessionError::NotFound(_)));
+
+        let cancel_error = session
+            .cancel(session_id)
+            .await
+            .expect_err("stub cancel should stay unavailable");
+        assert!(matches!(cancel_error, SessionError::NotFound(_)));
+
+        let status_error = session
+            .status(session_id)
+            .await
+            .expect_err("stub status should stay unavailable");
+        assert!(matches!(status_error, SessionError::NotFound(_)));
+
+        let statuses = session
+            .list_statuses()
+            .await
+            .expect("stub status list should stay empty");
+        assert!(statuses.is_empty());
     }
 }

@@ -4,6 +4,15 @@ use opencode_core::{context::CancellationToken, error::SessionError, id::Session
 use std::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 
+/// Read-only snapshot of a session run lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunSnapshot {
+    /// Whether a run lease is currently active.
+    pub is_active: bool,
+    /// Whether the active run has been cancellation-signalled.
+    pub is_cancelled: bool,
+}
+
 #[derive(Debug, Default)]
 struct RunStateInner {
     sessions: Mutex<HashMap<SessionId, CancellationToken>>,
@@ -89,6 +98,40 @@ impl RunState {
             false
         }
     }
+
+    /// Snapshot run occupancy/cancellation for one session.
+    #[must_use]
+    pub async fn snapshot(&self, session_id: SessionId) -> RunSnapshot {
+        let token = self
+            .inner
+            .sessions
+            .lock()
+            .expect("run-state mutex poisoned")
+            .get(&session_id)
+            .cloned();
+        match token {
+            Some(token) => RunSnapshot {
+                is_active: true,
+                is_cancelled: token.is_cancelled(),
+            },
+            None => RunSnapshot {
+                is_active: false,
+                is_cancelled: false,
+            },
+        }
+    }
+
+    /// List all sessions that currently have an active run lease.
+    #[must_use]
+    pub async fn list_active_sessions(&self) -> Vec<SessionId> {
+        self.inner
+            .sessions
+            .lock()
+            .expect("run-state mutex poisoned")
+            .keys()
+            .copied()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +190,52 @@ mod tests {
         drop(guard);
         let reacquired_after_drop = runs.acquire(session_id).await;
         assert!(reacquired_after_drop.is_ok());
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_idle_busy_and_cancelled_state() {
+        let runs = RunState::default();
+        let sid = SessionId::new();
+
+        let idle = runs.snapshot(sid).await;
+        assert!(!idle.is_active);
+        assert!(!idle.is_cancelled);
+
+        let guard = runs.acquire(sid).await.unwrap();
+        let busy = runs.snapshot(sid).await;
+        assert!(busy.is_active);
+        assert!(!busy.is_cancelled);
+
+        assert!(runs.cancel(sid).await);
+        let cancelled = runs.snapshot(sid).await;
+        assert!(cancelled.is_active);
+        assert!(cancelled.is_cancelled);
+
+        drop(guard);
+        let dropped = runs.snapshot(sid).await;
+        assert!(!dropped.is_active);
+        assert!(!dropped.is_cancelled);
+    }
+
+    #[tokio::test]
+    async fn list_active_sessions_tracks_guard_lifecycle() {
+        let runs = RunState::default();
+        let sid_a = SessionId::new();
+        let sid_b = SessionId::new();
+
+        let guard_a = runs.acquire(sid_a).await.unwrap();
+        let guard_b = runs.acquire(sid_b).await.unwrap();
+
+        let active = runs.list_active_sessions().await;
+        assert_eq!(active.len(), 2);
+        assert!(active.contains(&sid_a));
+        assert!(active.contains(&sid_b));
+
+        drop(guard_a);
+        let active_after_first_drop = runs.list_active_sessions().await;
+        assert_eq!(active_after_first_drop, vec![sid_b]);
+
+        drop(guard_b);
+        assert!(runs.list_active_sessions().await.is_empty());
     }
 }

@@ -3,6 +3,16 @@
 use opencode_core::id::{MessageId, SessionId};
 use serde::{Deserialize, Serialize};
 
+/// Runtime occupancy exposed to server handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionRuntimeStatus {
+    /// No active run currently leased for this session.
+    Idle,
+    /// A run is currently active for this session.
+    Busy,
+}
+
 /// A request to begin a new prompt turn in a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionPrompt {
@@ -30,6 +40,29 @@ pub struct SessionHandle {
     pub assistant_message_id: Option<MessageId>,
     /// Optional model actually selected for this turn.
     pub resolved_model: Option<String>,
+}
+
+/// Detached prompt acceptance metadata returned immediately to HTTP callers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetachedPromptAccepted {
+    /// Session that accepted detached execution.
+    pub session_id: SessionId,
+    /// Assistant message id allocated for this turn when available.
+    #[serde(default)]
+    pub assistant_message_id: Option<MessageId>,
+    /// Optional resolved model selected for this run.
+    #[serde(default)]
+    pub resolved_model: Option<String>,
+}
+
+impl From<SessionHandle> for DetachedPromptAccepted {
+    fn from(handle: SessionHandle) -> Self {
+        Self {
+            session_id: handle.session_id,
+            assistant_message_id: handle.assistant_message_id,
+            resolved_model: handle.resolved_model,
+        }
+    }
 }
 
 impl SessionHandle {
@@ -114,5 +147,35 @@ mod tests {
         assert_eq!(handle.session_id, sid);
         assert_eq!(handle.assistant_message_id, Some(mid));
         assert_eq!(handle.resolved_model.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn runtime_status_serializes_to_idle_busy_shape() {
+        assert_eq!(
+            serde_json::to_value(SessionRuntimeStatus::Idle).unwrap(),
+            serde_json::json!("idle")
+        );
+        assert_eq!(
+            serde_json::to_value(SessionRuntimeStatus::Busy).unwrap(),
+            serde_json::json!("busy")
+        );
+    }
+
+    #[test]
+    fn detached_prompt_acceptance_preserves_handle_metadata() {
+        let sid = SessionId::new();
+        let mid = MessageId::new();
+        let accepted = DetachedPromptAccepted::from(
+            SessionHandle::new(sid)
+                .with_assistant_message_id(mid)
+                .with_resolved_model("anthropic/claude-sonnet"),
+        );
+
+        assert_eq!(accepted.session_id, sid);
+        assert_eq!(accepted.assistant_message_id, Some(mid));
+        assert_eq!(
+            accepted.resolved_model.as_deref(),
+            Some("anthropic/claude-sonnet")
+        );
     }
 }

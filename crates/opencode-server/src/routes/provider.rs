@@ -283,7 +283,7 @@ mod tests {
     };
     use opencode_session::{
         engine::Session,
-        types::{SessionHandle, SessionPrompt},
+        types::{DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus},
     };
     use opencode_storage::Storage;
     use std::sync::{Arc, Mutex};
@@ -438,6 +438,21 @@ mod tests {
         async fn cancel(&self, _: SessionId) -> Result<(), SessionError> {
             Err(SessionError::NotFound("stub".into()))
         }
+        async fn prompt_detached(
+            &self,
+            _: SessionPrompt,
+        ) -> Result<DetachedPromptAccepted, SessionError> {
+            Err(SessionError::NotFound("stub".into()))
+        }
+        async fn status(&self, _: SessionId) -> Result<SessionRuntimeStatus, SessionError> {
+            Err(SessionError::NotFound("stub".into()))
+        }
+        async fn list_statuses(
+            &self,
+        ) -> Result<std::collections::HashMap<SessionId, SessionRuntimeStatus>, SessionError>
+        {
+            Ok(std::collections::HashMap::new())
+        }
     }
 
     fn app() -> Router {
@@ -447,6 +462,7 @@ mod tests {
         let state = AppState {
             config: Arc::new(cfg.clone()),
             bus: Arc::new(BroadcastBus::new(64)),
+            event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session: Arc::new(StubSession),
             registry: Arc::new(ModelRegistry::new()),

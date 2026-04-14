@@ -6,7 +6,7 @@ Project documentation for the Rust workspace.
 
 | File | Purpose |
 | --- | --- |
-| [`MANUAL_TESTING.md`](MANUAL_TESTING.md) | Manual validation of the session runtime HTTP path and raw provider harness |
+| [`MANUAL_TESTING.md`](MANUAL_TESTING.md) | Manual validation of session parity routes, SSE event stream, and the raw provider harness |
 | [`SESSION_RUNTIME.md`](SESSION_RUNTIME.md) | Current bounded session runtime/tool-loop behavior |
 
 ## What Belongs Here
@@ -20,6 +20,7 @@ Project documentation for the Rust workspace.
 The most concrete operational guides today are:
 
 - the session-runtime HTTP path (`projects -> sessions -> prompt -> messages`)
+- the live SSE event path (`GET /api/v1/event` with `server.connected` + heartbeats)
 - the lower-level provider harness (`POST /api/v1/provider/stream`)
 
 The session runtime document is intentionally implementation-faithful: Anthropic/Google tool-loop support exists, while broader parity items remain deferred.

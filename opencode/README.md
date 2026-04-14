@@ -25,6 +25,7 @@ This crate is the runnable entrypoint for the workspace. It keeps `src/main.rs` 
 - `OPENCODE_MANUAL_HARNESS=1` enables the manual provider streaming route.
 - Standard providers are registered for the harness only when that environment variable is set.
 - Server startup wires `SessionEngine` from `opencode-session`, so session prompt/cancel APIs are runtime-backed.
+- Server startup also wires the default SSE heartbeat driver used by `GET /api/v1/event`.
 - Anthropic and Google session turns can execute the bounded Rust built-in tool loop during `POST /api/v1/sessions/:sid/prompt`.
 - Server startup also wires provider parity services (`ProviderCatalogService`, `ProviderAuthService`, `AccountService`) into `opencode-server` app state.
 - Provider catalog startup overlays model metadata from `.opencode/models.json` when present.
@@ -35,8 +36,18 @@ Even though the CLI `prompt` command is still stubbed, server mode exposes the r
 
 - `POST /api/v1/sessions/:sid/prompt`
 - `POST /api/v1/sessions/:sid/cancel`
+- `GET /api/v1/session/status`
+- `GET /api/v1/session/:sid/status`
+- `POST /api/v1/session/:sid/abort`
+- `POST /api/v1/session/:sid/prompt`
+- `GET /api/v1/event`
 
 These routes are served by `opencode-server` and call into `opencode-session::engine::SessionEngine`.
+
+Key notes:
+
+- `GET /api/v1/event` is a live SSE stream with `server.connected`, heartbeats, and translated runtime events.
+- Detached prompt alias requests return acceptance metadata immediately; background failures can surface as `session.error`.
 
 ## Provider/Auth/Account parity surface
 

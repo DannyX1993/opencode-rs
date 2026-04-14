@@ -92,7 +92,7 @@ curl -X POST http://localhost:4141/api/v1/projects/$PID/sessions \
     "slug": "manual-runtime-test",
     "directory": "/home/dannyx/projects/Rust/opencode-rs",
     "title": "Manual runtime test",
-    "version": "0.8.0",
+    "version": "0.9.0",
     "share_url": null,
     "summary_additions": null,
     "summary_deletions": null,
@@ -298,4 +298,4 @@ requires a real API key and makes live network requests to external providers.
 
 - `POST /api/v1/provider/stream` does **not** exercise session persistence or the runtime tool loop.
 - `POST /api/v1/sessions/:sid/prompt` is the correct path for validating the bounded Anthropic/Google runtime parity work.
-- The current workspace version remains `0.8.0`.
+- The current workspace version remains `0.9.0`.

@@ -26,7 +26,7 @@ thiserror        = { workspace = true }
 futures          = { workspace = true }
 
 [dev-dependencies]
-tokio       = { workspace = true }
+tokio       = { workspace = true, features = ["test-util"] }
 tower       = { workspace = true }
 async-trait = { workspace = true }
 wiremock    = { workspace = true }

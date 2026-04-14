@@ -61,6 +61,13 @@ pub enum BusEvent {
         /// Approximate number of tokens freed.
         tokens_freed: u32,
     },
+    /// A session run failed with a terminal error payload.
+    SessionError {
+        /// Session that failed.
+        session_id: SessionId,
+        /// Human-readable error description.
+        error: String,
+    },
 
     // ── Messages & Parts ───────────────────────────────────────────────────
     /// A new message was appended to a session.
@@ -149,7 +156,8 @@ impl BusEvent {
             | Self::SessionUpdated { .. }
             | Self::SessionCancelled { .. }
             | Self::SessionCompleted { .. }
-            | Self::SessionCompacted { .. } => EventKind::Session,
+            | Self::SessionCompacted { .. }
+            | Self::SessionError { .. } => EventKind::Session,
 
             Self::MessageAdded { .. } | Self::PartAdded { .. } => EventKind::Message,
 
@@ -210,6 +218,14 @@ mod tests {
             BusEvent::SessionCompacted {
                 session_id: sid(),
                 tokens_freed: 100
+            }
+            .kind(),
+            EventKind::Session
+        );
+        assert_eq!(
+            BusEvent::SessionError {
+                session_id: sid(),
+                error: "detached failed".into()
             }
             .kind(),
             EventKind::Session

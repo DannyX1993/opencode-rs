@@ -22,6 +22,12 @@ Active. The crate has real routes, router tests, and is used by `cargo run -p op
 | `POST` | `/api/v1/sessions/{sid}/messages` | appends a message and parts |
 | `POST` | `/api/v1/sessions/{sid}/prompt` | starts a runtime prompt turn via `opencode-session`, including bounded Anthropic/Google tool loops |
 | `POST` | `/api/v1/sessions/{sid}/cancel` | cancels active prompt turn for that session |
+| `GET` | `/api/v1/session/status` | lists active per-session runtime status snapshots (`idle|busy` surface) |
+| `GET` | `/api/v1/session/{sid}/status` | returns runtime status for one session or the existing not-found error shape |
+| `POST` | `/api/v1/session/{sid}/abort` | lifecycle alias for cancel semantics |
+| `GET` | `/api/v1/session/{sid}/message` | wrapper for the existing message-list behavior |
+| `POST` | `/api/v1/session/{sid}/prompt` | upstream-shaped prompt alias; supports detached acceptance mode |
+| `GET` | `/api/v1/event` | stable SSE stream for `server.connected`, `server.heartbeat`, and translated bus events |
 | `GET` | `/api/v1/provider` | returns visible provider catalog + defaults + connected providers |
 | `GET` | `/api/v1/provider/auth` | returns supported auth methods per built-in provider |
 | `POST` | `/api/v1/provider/{provider}/oauth/authorize` | starts OAuth/device-style handoff for supported methods |
@@ -36,6 +42,9 @@ Active. The crate has real routes, router tests, and is used by `cargo run -p op
 
 - The provider stream route returns `403` unless `OPENCODE_MANUAL_HARNESS=1` was set at startup.
 - The session engine now covers a bounded runtime tool loop for Anthropic/Google, but full runtime parity is not complete.
+- `/api/v1/event` is live-only SSE in this release; it does not replay persisted history.
+- Singular parity remains intentionally narrow: unsupported write wrappers such as `POST /api/v1/session/{sid}/message` are still absent.
+- Detached background prompt failures can be surfaced as `session.error`; successful detached calls return acceptance metadata immediately.
 - `/api/v1/provider/stream` is a raw provider harness; it does not create sessions, persist history, or exercise the session replay loop by itself.
 - OpenAI remains available through the provider layer and harness, but not as a tool-capable session-runtime provider in this MVP.
 - OAuth pending authorization state is in-process (not durable across server restarts).
@@ -62,6 +71,14 @@ To exercise the persisted runtime loop through HTTP today:
 2. Create a session for that project.
 3. Call `POST /api/v1/sessions/{sid}/prompt` with text and an Anthropic/Google model.
 4. Inspect `GET /api/v1/sessions/{sid}/messages` to confirm assistant text, `tool_use`, and `tool_result` artifacts.
+5. Optionally confirm `/api/v1/session/{sid}/status`, `/api/v1/session/{sid}/abort`, and detached `/api/v1/session/{sid}/prompt` alias behavior.
+
+## Manual SSE path
+
+1. Connect `curl -N http://localhost:4141/api/v1/event`.
+2. Confirm the first frame is `server.connected`.
+3. Leave the stream idle long enough to observe `server.heartbeat`.
+4. Trigger runtime activity and confirm translated events such as `message.added` arrive in order.
 
 Use `/api/v1/provider/stream` only when you want a lower-level provider streaming check without session persistence.
 
@@ -87,4 +104,4 @@ cargo test -p opencode-server
 
 ## Workspace Role
 
-`opencode-server` sits on top of `opencode-storage`, `opencode-provider`, `opencode-session`, and `opencode-bus` to expose the Rust runtime over HTTP.
+`opencode-server` sits on top of `opencode-storage`, `opencode-provider`, `opencode-session`, and `opencode-bus` to expose the Rust runtime over HTTP, including parity aliases and the live SSE surface.

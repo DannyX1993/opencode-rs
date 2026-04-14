@@ -10,7 +10,9 @@ use opencode_core::{
     dto::{MessageWithParts, PartRow, SessionRow},
     id::{MessageId, ProjectId, SessionId, WorkspaceId},
 };
-use opencode_session::types::{SessionHandle, SessionPrompt};
+use opencode_session::types::{
+    DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::HttpError, state::AppState};
@@ -249,6 +251,8 @@ pub(crate) struct SessionPromptDto {
     model: Option<String>,
     #[serde(default)]
     plan_mode: bool,
+    #[serde(default)]
+    detached: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -266,6 +270,31 @@ impl From<SessionHandle> for SessionHandleDto {
             session_id: handle.session_id,
             assistant_message_id: handle.assistant_message_id,
             resolved_model: handle.resolved_model,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionRuntimeStatusDto {
+    session_id: SessionId,
+    status: SessionRuntimeStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionDetachedPromptDto {
+    session_id: SessionId,
+    #[serde(default)]
+    assistant_message_id: Option<MessageId>,
+    #[serde(default)]
+    resolved_model: Option<String>,
+}
+
+impl From<DetachedPromptAccepted> for SessionDetachedPromptDto {
+    fn from(accepted: DetachedPromptAccepted) -> Self {
+        Self {
+            session_id: accepted.session_id,
+            assistant_message_id: accepted.assistant_message_id,
+            resolved_model: accepted.resolved_model,
         }
     }
 }
@@ -369,6 +398,26 @@ pub(crate) async fn prompt(
     Path(sid): Path<SessionId>,
     Json(payload): Json<SessionPromptDto>,
 ) -> impl IntoResponse {
+    if payload.detached {
+        return match s
+            .session
+            .prompt_detached(SessionPrompt {
+                session_id: sid,
+                text: payload.text,
+                model: payload.model,
+                plan_mode: payload.plan_mode,
+            })
+            .await
+        {
+            Ok(handle) => (
+                StatusCode::ACCEPTED,
+                Json(SessionDetachedPromptDto::from(handle)),
+            )
+                .into_response(),
+            Err(err) => HttpError::from(err).into_response(),
+        };
+    }
+
     match s
         .session
         .prompt(SessionPrompt {
@@ -395,6 +444,54 @@ pub(crate) async fn cancel(
     }
 }
 
+/// `GET /api/v1/session/status` — list active runtime statuses.
+pub(crate) async fn list_runtime_status(State(s): State<AppState>) -> impl IntoResponse {
+    match s.session.list_statuses().await {
+        Ok(rows) => {
+            let body = rows
+                .into_iter()
+                .map(|(session_id, status)| SessionRuntimeStatusDto { session_id, status })
+                .collect::<Vec<_>>();
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(err) => HttpError::from(err).into_response(),
+    }
+}
+
+/// `GET /api/v1/session/:sid/status` — read runtime status for one session.
+pub(crate) async fn runtime_status(
+    State(s): State<AppState>,
+    Path(sid): Path<SessionId>,
+) -> impl IntoResponse {
+    match s.session.status(sid).await {
+        Ok(status) => (
+            StatusCode::OK,
+            Json(SessionRuntimeStatusDto {
+                session_id: sid,
+                status,
+            }),
+        )
+            .into_response(),
+        Err(err) => HttpError::from(err).into_response(),
+    }
+}
+
+/// `POST /api/v1/session/:sid/abort` — alias for cancel.
+pub(crate) async fn abort(
+    State(s): State<AppState>,
+    Path(sid): Path<SessionId>,
+) -> impl IntoResponse {
+    cancel(State(s), Path(sid)).await
+}
+
+/// `GET /api/v1/session/:sid/message` — alias for plural messages list.
+pub(crate) async fn list_messages_alias(
+    State(s): State<AppState>,
+    Path(sid): Path<SessionId>,
+) -> impl IntoResponse {
+    list_messages(State(s), Path(sid)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,7 +514,7 @@ mod tests {
     use opencode_provider::{AccountService, ProviderAuthService, ProviderCatalogService};
     use opencode_session::{
         engine::Session,
-        types::{SessionHandle, SessionPrompt},
+        types::{DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus},
     };
     use opencode_storage::Storage;
     use std::sync::{Arc, Mutex};
@@ -582,6 +679,7 @@ mod tests {
     struct StubSession {
         mode: StubSessionMode,
         prompts: Arc<Mutex<Vec<SessionPrompt>>>,
+        detached_prompts: Arc<Mutex<Vec<SessionPrompt>>>,
         cancels: Arc<Mutex<Vec<SessionId>>>,
     }
 
@@ -590,6 +688,7 @@ mod tests {
             Self {
                 mode,
                 prompts: Arc::new(Mutex::new(Vec::new())),
+                detached_prompts: Arc::new(Mutex::new(Vec::new())),
                 cancels: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -622,6 +721,47 @@ mod tests {
                 StubSessionMode::Busy => Err(SessionError::Busy(session_id.to_string())),
             }
         }
+
+        async fn prompt_detached(
+            &self,
+            req: SessionPrompt,
+        ) -> Result<DetachedPromptAccepted, SessionError> {
+            self.detached_prompts.lock().unwrap().push(req.clone());
+            match self.mode {
+                StubSessionMode::NotFound => Err(SessionError::NotFound("stub".into())),
+                StubSessionMode::Busy => Err(SessionError::Busy(req.session_id.to_string())),
+                StubSessionMode::Success => Ok(DetachedPromptAccepted {
+                    session_id: req.session_id,
+                    assistant_message_id: Some(MessageId::new()),
+                    resolved_model: req.model.or(Some("stub/model".into())),
+                }),
+                StubSessionMode::NoActiveRun => {
+                    Err(SessionError::NoActiveRun(req.session_id.to_string()))
+                }
+            }
+        }
+
+        async fn status(
+            &self,
+            session_id: SessionId,
+        ) -> Result<SessionRuntimeStatus, SessionError> {
+            match self.mode {
+                StubSessionMode::NotFound => Err(SessionError::NotFound(session_id.to_string())),
+                StubSessionMode::NoActiveRun => Ok(SessionRuntimeStatus::Idle),
+                StubSessionMode::Success | StubSessionMode::Busy => Ok(SessionRuntimeStatus::Busy),
+            }
+        }
+
+        async fn list_statuses(
+            &self,
+        ) -> Result<std::collections::HashMap<SessionId, SessionRuntimeStatus>, SessionError>
+        {
+            let mut out = std::collections::HashMap::new();
+            if matches!(self.mode, StubSessionMode::Success | StubSessionMode::Busy) {
+                out.insert(SessionId::new(), SessionRuntimeStatus::Busy);
+            }
+            Ok(out)
+        }
     }
 
     fn app(stub: Stub) -> Router {
@@ -634,6 +774,7 @@ mod tests {
         let state = crate::state::AppState {
             config: Arc::new(cfg.clone()),
             bus: Arc::new(BroadcastBus::new(64)),
+            event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session,
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
@@ -656,6 +797,7 @@ mod tests {
         let state = crate::state::AppState {
             config: Arc::new(cfg.clone()),
             bus: Arc::new(BroadcastBus::new(64)),
+            event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session,
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
@@ -1317,5 +1459,140 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn singular_runtime_status_route_returns_busy_shape() {
+        let sid = SessionId::new();
+        let session = Arc::new(StubSession::new(StubSessionMode::Success));
+        let resp = app_with_session(Stub::default(), session)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/session/{sid}/status"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["session_id"], sid.to_string());
+        assert_eq!(json["status"], "busy");
+    }
+
+    #[tokio::test]
+    async fn singular_runtime_status_route_maps_not_found() {
+        let sid = SessionId::new();
+        let session = Arc::new(StubSession::new(StubSessionMode::NotFound));
+        let resp = app_with_session(Stub::default(), session)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/session/{sid}/status"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn detached_prompt_alias_returns_acceptance_without_waiting() {
+        let sid = SessionId::new();
+        let session = Arc::new(StubSession::new(StubSessionMode::Success));
+        let detached_calls = Arc::clone(&session.detached_prompts);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/session/{sid}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "text": "detach",
+                    "detached": true
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app_with_session(Stub::default(), session)
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["session_id"], sid.to_string());
+
+        let calls = detached_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].session_id, sid);
+        assert_eq!(calls[0].text, "detach");
+    }
+
+    #[tokio::test]
+    async fn abort_alias_delegates_to_cancel_handler() {
+        let sid = SessionId::new();
+        let session = Arc::new(StubSession::new(StubSessionMode::Success));
+        let cancels = Arc::clone(&session.cancels);
+
+        let resp = app_with_session(Stub::default(), session)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/session/{sid}/abort"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let calls = cancels.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], sid);
+    }
+
+    #[tokio::test]
+    async fn singular_message_wrapper_matches_plural_message_list_behavior() {
+        let stub = Stub::default();
+        let pid = ProjectId::new();
+        let sid = SessionId::new();
+        let mid = MessageId::new();
+        stub.create_session(sess(sid, pid)).await.unwrap();
+        let mwp = msg_with_parts(mid, sid);
+        stub.append_message(mwp.info.clone(), mwp.parts.clone())
+            .await
+            .unwrap();
+
+        let resp = app(stub)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/session/{sid}/message"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rows: Vec<MessageWithParts> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].info.id, mid);
+    }
+
+    #[tokio::test]
+    async fn singular_message_wrapper_rejects_unsupported_write_parity_route() {
+        let sid = SessionId::new();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/session/{sid}/message"))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+
+        let resp = app(Stub::default()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 }

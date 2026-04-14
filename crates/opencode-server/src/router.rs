@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 use crate::{
-    routes::{config, project, provider, session},
+    routes::{config, event, project, provider, session},
     state::AppState,
 };
 use opencode_core::error::ServerError;
@@ -37,6 +37,12 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/sessions/{sid}/prompt", post(session::prompt))
         .route("/sessions/{sid}/cancel", post(session::cancel))
+        // Session parity aliases (port-server-session-and-event-apis)
+        .route("/session/status", get(session::list_runtime_status))
+        .route("/session/{sid}/status", get(session::runtime_status))
+        .route("/session/{sid}/abort", post(session::abort))
+        .route("/session/{sid}/message", get(session::list_messages_alias))
+        .route("/session/{sid}/prompt", post(session::prompt))
         .route("/provider", get(provider::list))
         .route("/provider/auth", get(provider::auth_methods))
         .route(
@@ -54,6 +60,7 @@ pub fn build(state: AppState) -> Router {
             axum::routing::delete(provider::remove_account),
         )
         .route("/config/providers", get(config::providers))
+        .route("/event", get(event::stream))
         // Manual provider harness (Phase 2 — env-gated)
         .route("/provider/stream", post(provider::stream));
 
@@ -93,7 +100,8 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use opencode_bus::BroadcastBus;
+    use futures::StreamExt;
+    use opencode_bus::{BroadcastBus, BusEvent, EventBus};
     use opencode_core::config::Config;
     use opencode_core::{
         dto::{
@@ -107,9 +115,12 @@ mod tests {
         AccountService, ModelRegistry, ProviderAuthService, ProviderCatalogService,
     };
     use opencode_session::engine::Session;
-    use opencode_session::types::{SessionHandle, SessionPrompt};
+    use opencode_session::types::{
+        DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus,
+    };
     use opencode_storage::Storage;
     use std::sync::Arc;
+    use tokio::sync::Notify;
     use tower::ServiceExt;
 
     // ── Test doubles ─────────────────────────────────────────────────────────
@@ -229,6 +240,21 @@ mod tests {
         async fn cancel(&self, _: SessionId) -> Result<(), SessionError> {
             Err(SessionError::NotFound("stub".into()))
         }
+        async fn prompt_detached(
+            &self,
+            _: SessionPrompt,
+        ) -> Result<DetachedPromptAccepted, SessionError> {
+            Err(SessionError::NotFound("stub".into()))
+        }
+        async fn status(&self, _: SessionId) -> Result<SessionRuntimeStatus, SessionError> {
+            Err(SessionError::NotFound("stub".into()))
+        }
+        async fn list_statuses(
+            &self,
+        ) -> Result<std::collections::HashMap<SessionId, SessionRuntimeStatus>, SessionError>
+        {
+            Ok(std::collections::HashMap::new())
+        }
     }
 
     fn state() -> AppState {
@@ -237,6 +263,7 @@ mod tests {
         AppState {
             config: Arc::new(cfg.clone()),
             bus: Arc::new(BroadcastBus::new(64)),
+            event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session: Arc::new(StubSession),
             registry: Arc::new(ModelRegistry::new()),
@@ -244,6 +271,25 @@ mod tests {
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,
+        }
+    }
+
+    async fn read_sse_frame(
+        stream: &mut (impl futures::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+    ) -> String {
+        let mut buffer = Vec::new();
+
+        loop {
+            let chunk = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+                .await
+                .expect("expected SSE bytes before timeout")
+                .expect("stream should remain open")
+                .expect("SSE chunk should be readable");
+            buffer.extend_from_slice(&chunk);
+
+            if buffer.windows(2).any(|window| window == b"\n\n") {
+                return String::from_utf8(buffer).expect("SSE frame should be valid utf-8");
+            }
         }
     }
 
@@ -668,5 +714,132 @@ mod tests {
             body_str.contains("hi"),
             "SSE body must contain the prompt reply text, got: {body_str}"
         );
+    }
+
+    #[tokio::test]
+    async fn instance_event_route_returns_sse_content_type() {
+        let app = build(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/event")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("event route should set content-type")
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/event-stream"));
+    }
+
+    #[tokio::test]
+    async fn instance_event_route_bootstrap_streams_wire_event_payload() {
+        let app = build(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/event")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut stream = resp.into_body().into_data_stream();
+        let body_str = read_sse_frame(&mut stream).await;
+        assert!(
+            body_str.starts_with("data: {"),
+            "expected SSE data frame: {body_str}"
+        );
+        assert!(body_str.contains("\"type\":\"server.connected\""));
+        assert!(body_str.contains("\"properties\":{}"));
+    }
+
+    #[tokio::test]
+    async fn instance_event_route_heartbeat_waits_for_idle_interval_before_wire_frame() {
+        let mut state = state();
+        let _bus_guard = Arc::clone(&state.bus);
+        let heartbeat = Arc::new(Notify::new());
+        state.event_heartbeat = crate::state::EventHeartbeat::Manual(Arc::clone(&heartbeat));
+        let app = build(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/event")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut stream = resp.into_body().into_data_stream();
+        let body_str = read_sse_frame(&mut stream).await;
+        assert!(body_str.contains("\"type\":\"server.connected\""));
+
+        match tokio::time::timeout(std::time::Duration::from_millis(10), stream.next()).await {
+            Err(_) => {}
+            Ok(Some(Ok(bytes))) => panic!(
+                "heartbeat must not arrive before the manual trigger fires, got chunk: {}",
+                std::str::from_utf8(&bytes).unwrap_or("<non-utf8>")
+            ),
+            Ok(Some(Err(err))) => panic!(
+                "heartbeat must not arrive before the manual trigger fires, got body error: {err}"
+            ),
+            Ok(None) => panic!(
+                "heartbeat must not arrive before the manual trigger fires, stream closed early"
+            ),
+        }
+
+        heartbeat.notify_one();
+
+        let heartbeat = read_sse_frame(&mut stream).await;
+        assert!(heartbeat.contains("\"type\":\"server.heartbeat\""));
+        assert!(heartbeat.contains("\"properties\":{}"));
+    }
+
+    #[tokio::test]
+    async fn instance_event_route_streams_translated_bus_event_payload() {
+        let state = state();
+        let bus = std::sync::Arc::clone(&state.bus);
+        let app = build(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/event")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut stream = resp.into_body().into_data_stream();
+        let _ = read_sse_frame(&mut stream).await;
+        let sid = SessionId::new();
+        let mid = opencode_core::id::MessageId::new();
+        let _ = bus.publish(BusEvent::MessageAdded {
+            session_id: sid,
+            message_id: mid,
+        });
+        let body_str = read_sse_frame(&mut stream).await;
+        assert!(
+            body_str.starts_with("data: {"),
+            "expected SSE data frame: {body_str}"
+        );
+        assert!(body_str.contains("\"type\":\"message.added\""));
+        assert!(body_str.contains(&format!("\"session_id\":\"{sid}\"")));
+        assert!(body_str.contains(&format!("\"message_id\":\"{mid}\"")));
     }
 }

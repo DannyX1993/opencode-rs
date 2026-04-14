@@ -14,11 +14,16 @@ use opencode_provider::{
 };
 use opencode_storage::Storage;
 use opencode_tool::{Ctx, ToolCall, ToolRegistry, ToolResult};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+    time::SystemTime,
+};
 
 use crate::run_state::RunState;
 use crate::runtime;
-use crate::types::{SessionHandle, SessionPrompt};
+use crate::types::{DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus};
 
 /// The session engine abstraction.
 ///
@@ -34,12 +39,34 @@ pub trait Session: Send + Sync {
     /// provider fails to initialise.
     async fn prompt(&self, req: SessionPrompt) -> Result<SessionHandle, SessionError>;
 
+    /// Submit a prompt in detached/background mode.
+    ///
+    /// Returns acceptance metadata immediately while execution continues
+    /// asynchronously.
+    async fn prompt_detached(
+        &self,
+        req: SessionPrompt,
+    ) -> Result<DetachedPromptAccepted, SessionError>;
+
     /// Cancel an in-progress prompt turn.
     ///
     /// # Errors
     ///
     /// Returns [`SessionError::NoActiveRun`] if no active turn exists.
     async fn cancel(&self, session_id: SessionId) -> Result<(), SessionError>;
+
+    /// Read current runtime occupancy for one session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::NotFound`] when the session does not exist.
+    async fn status(&self, session_id: SessionId) -> Result<SessionRuntimeStatus, SessionError>;
+
+    /// List currently active runtime statuses.
+    ///
+    /// Implementations may return only non-idle entries.
+    async fn list_statuses(&self)
+    -> Result<HashMap<SessionId, SessionRuntimeStatus>, SessionError>;
 }
 
 /// Constructor-backed runtime session engine.
@@ -276,12 +303,85 @@ impl Session for SessionEngine {
         .await
     }
 
+    async fn prompt_detached(
+        &self,
+        req: SessionPrompt,
+    ) -> Result<DetachedPromptAccepted, SessionError> {
+        let exists = self
+            .storage
+            .get_session(req.session_id)
+            .await
+            .map_err(|err| SessionError::RuntimeInternal(err.to_string()))?
+            .is_some();
+        if !exists {
+            return Err(SessionError::NotFound(req.session_id.to_string()));
+        }
+
+        let accepted = DetachedPromptAccepted {
+            session_id: req.session_id,
+            assistant_message_id: None,
+            resolved_model: req.model.clone().or_else(|| self.default_model.clone()),
+        };
+
+        let detached_engine = Self {
+            storage: Arc::clone(&self.storage),
+            bus: Arc::clone(&self.bus),
+            registry: Arc::clone(&self.registry),
+            default_model: self.default_model.clone(),
+            runs: Arc::clone(&self.runs),
+        };
+
+        let accepted_session_id = accepted.session_id;
+
+        tokio::spawn(async move {
+            if let Err(err) = detached_engine.prompt(req).await {
+                if !matches!(err, SessionError::Cancelled | SessionError::NoActiveRun(_)) {
+                    let _ = detached_engine.bus.publish(BusEvent::SessionError {
+                        session_id: accepted_session_id,
+                        error: err.to_string(),
+                    });
+                }
+            }
+        });
+
+        Ok(accepted)
+    }
+
     async fn cancel(&self, session_id: SessionId) -> Result<(), SessionError> {
         if self.runs.cancel(session_id).await {
             Ok(())
         } else {
             Err(SessionError::NoActiveRun(session_id.to_string()))
         }
+    }
+
+    async fn status(&self, session_id: SessionId) -> Result<SessionRuntimeStatus, SessionError> {
+        let exists = self
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(|err| SessionError::RuntimeInternal(err.to_string()))?
+            .is_some();
+        if !exists {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
+
+        let snapshot = self.runs.snapshot(session_id).await;
+        if snapshot.is_active {
+            Ok(SessionRuntimeStatus::Busy)
+        } else {
+            Ok(SessionRuntimeStatus::Idle)
+        }
+    }
+
+    async fn list_statuses(
+        &self,
+    ) -> Result<HashMap<SessionId, SessionRuntimeStatus>, SessionError> {
+        let mut statuses = HashMap::new();
+        for session_id in self.runs.list_active_sessions().await {
+            statuses.insert(session_id, SessionRuntimeStatus::Busy);
+        }
+        Ok(statuses)
     }
 }
 
@@ -1008,6 +1108,240 @@ mod tests {
         assert_eq!(history_after[0].parts.len(), 1);
         assert_eq!(history_after[0].parts[0].id, existing_part_id);
         assert_eq!(history_after[0].parts[0].data["text"], "existing");
+    }
+
+    #[tokio::test]
+    async fn status_reports_busy_for_active_run_then_idle_after_cancel() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let engine = Arc::new(
+            build_engine(
+                Arc::clone(&storage),
+                Arc::new(StubProvider::pending_with_start_signal(Arc::clone(
+                    &started,
+                ))),
+                Some("stub/test-model".into()),
+            )
+            .await,
+        );
+
+        let runner = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .prompt(SessionPrompt {
+                        session_id,
+                        text: "long run".into(),
+                        model: None,
+                        plan_mode: false,
+                    })
+                    .await
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), started.notified())
+            .await
+            .expect("prompt should start");
+
+        assert_eq!(
+            engine.status(session_id).await.unwrap(),
+            crate::types::SessionRuntimeStatus::Busy
+        );
+
+        engine.cancel(session_id).await.unwrap();
+        let joined = tokio::time::timeout(std::time::Duration::from_millis(200), runner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(joined, Err(SessionError::Cancelled)));
+
+        assert_eq!(
+            engine.status(session_id).await.unwrap(),
+            crate::types::SessionRuntimeStatus::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn list_statuses_returns_only_busy_sessions_and_unknown_status_is_not_found() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        let unknown_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let engine = Arc::new(
+            build_engine(
+                Arc::clone(&storage),
+                Arc::new(StubProvider::pending_with_start_signal(Arc::clone(
+                    &started,
+                ))),
+                Some("stub/test-model".into()),
+            )
+            .await,
+        );
+
+        let runner = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .prompt(SessionPrompt {
+                        session_id,
+                        text: "long run".into(),
+                        model: None,
+                        plan_mode: false,
+                    })
+                    .await
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), started.notified())
+            .await
+            .expect("prompt should start");
+
+        let statuses = engine.list_statuses().await.unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(
+            statuses.get(&session_id),
+            Some(&crate::types::SessionRuntimeStatus::Busy)
+        );
+
+        let status_err = engine.status(unknown_id).await.unwrap_err();
+        assert!(matches!(status_err, SessionError::NotFound(_)));
+
+        engine.cancel(session_id).await.unwrap();
+        let joined = tokio::time::timeout(std::time::Duration::from_millis(200), runner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(joined, Err(SessionError::Cancelled)));
+
+        assert!(engine.list_statuses().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn detached_prompt_accepts_immediately_and_starts_background_run() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let engine = Arc::new(
+            build_engine(
+                Arc::clone(&storage),
+                Arc::new(StubProvider::pending_with_start_signal(Arc::clone(
+                    &started,
+                ))),
+                Some("stub/test-model".into()),
+            )
+            .await,
+        );
+
+        let accepted = engine
+            .prompt_detached(SessionPrompt {
+                session_id,
+                text: "detach".into(),
+                model: None,
+                plan_mode: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(accepted.session_id, session_id);
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), started.notified())
+            .await
+            .expect("detached prompt should start provider stream");
+        assert_eq!(
+            engine.status(session_id).await.unwrap(),
+            crate::types::SessionRuntimeStatus::Busy
+        );
+
+        engine.cancel(session_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detached_prompt_publishes_session_error_on_background_failure() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let bus = Arc::new(BroadcastBus::default_capacity());
+        let mut rx = bus.subscribe();
+        let registry = Arc::new(ModelRegistry::new());
+        registry
+            .register("stub", Arc::new(StubProvider::done()))
+            .await;
+        let engine = SessionEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&bus),
+            registry,
+            Some("invalid-model-id".into()),
+        );
+
+        let accepted = engine
+            .prompt_detached(SessionPrompt {
+                session_id,
+                text: "detach-fail".into(),
+                model: None,
+                plan_mode: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(accepted.session_id, session_id);
+
+        let mut observed = None;
+        for _ in 0..4 {
+            let event = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .expect("expected bus event")
+                .expect("event should decode");
+            if let BusEvent::SessionError {
+                session_id: sid,
+                error,
+            } = event
+            {
+                observed = Some((sid, error));
+                break;
+            }
+        }
+
+        let (sid, error) = observed.expect("detached failure should publish SessionError event");
+        assert_eq!(sid, session_id);
+        assert!(error.contains("invalid model id"));
     }
 
     #[tokio::test]

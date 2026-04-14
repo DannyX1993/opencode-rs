@@ -9,7 +9,7 @@ Rust workspace for the `opencode` runtime, server surface, and core libraries.
 
 The workspace is **partially production-shaped**: core crates are functional (CLI, storage, provider adapters, HTTP routes, provider/account domain services, and session runtime core), while some user-facing surfaces remain intentionally stubbed.
 
-Current milestone reflected in this repo state: **`port-provider-auth-and-account-parity` (verified, release-prep)**.
+Current milestone reflected in this repo state: **`port-server-session-and-event-apis` (verified, release-prep)**.
 
 ## Workspace Architecture (high level)
 
@@ -34,11 +34,11 @@ opencode-core provides shared DTOs/config/errors/IDs across all crates.
 | `crates/opencode-cli/` | library crate | active | Clap definitions, bootstrap, `tool` command wiring |
 | `crates/opencode-core/` | library crate | active | Shared config, DTOs, IDs, errors, tracing/context helpers |
 | `crates/opencode-provider/` | library crate | active | Runtime model adapters plus provider catalog/auth/account services |
-| `crates/opencode-server/` | library crate | active | Axum router + project/session routes and provider/config/account contracts |
+| `crates/opencode-server/` | library crate | active | Axum router + project/session routes, SSE event stream, and provider/config/account contracts |
 | `crates/opencode-storage/` | library crate | active | SQLite persistence, migrations, repositories, account state, event storage |
 | `crates/opencode-tool/` | library crate | active | Tool trait, registry, built-in read/list/glob/grep/write/bash tools |
-| `crates/opencode-bus/` | library crate | partial | Typed in-process broadcast bus with published event types |
-| `crates/opencode-session/` | library crate | partial | Session runtime core: prompt lifecycle, run-state exclusivity, cancellation |
+| `crates/opencode-bus/` | library crate | partial | Typed in-process broadcast bus with published lifecycle/runtime events |
+| `crates/opencode-session/` | library crate | partial | Session runtime core: prompt lifecycle, detached execution, run-state status, cancellation |
 | `crates/opencode-lsp/` | library crate | stub | Placeholder for future LSP integration |
 | `crates/opencode-mcp/` | library crate | stub | Placeholder for future MCP integration |
 | `crates/opencode-plugin/` | library crate | stub | Placeholder for future plugin host |
@@ -46,7 +46,16 @@ opencode-core provides shared DTOs/config/errors/IDs across all crates.
 | `docs/` | docs | active | Manual testing + architecture/runtime notes |
 | `scripts/` | scripts | active | Helper scripts (coverage, etc.) |
 
-## Provider/auth/account parity completed in this change stream
+## Session/event parity completed in this change stream
+
+The `port-server-session-and-event-apis` slice is now landed in code, docs, and tests:
+
+- Public SSE route `GET /api/v1/event` now emits `server.connected`, idle heartbeats, and translated live runtime events in wire order.
+- Singular upstream-shaped session aliases now exist for runtime status, abort, message-list wrapper, and detached prompt execution.
+- Runtime status is sourced from in-memory `RunState` snapshots as stable `idle|busy` shapes instead of new durable tables.
+- Detached background failures can surface as `session.error` on the in-process bus and SSE layer.
+
+## Provider/auth/account parity retained from the prior stream
 
 The `port-provider-auth-and-account-parity` slice is now landed in code and tests:
 
@@ -55,12 +64,14 @@ The `port-provider-auth-and-account-parity` slice is now landed in code and test
 - Account persistence and active state reuse existing SQLite tables (`account`, `account_state`, `control_account`) with no schema migration.
 - Startup overlays provider catalog models from `.opencode/models.json` cache when present; built-in provider defaults remain fallback.
 
-## Runtime/session scope retained from prior stream
+## Runtime/session scope retained and extended
 
 - `SessionEngine::prompt` rebuilds provider requests from persisted session history.
 - Anthropic and Google session turns can complete provider-driven built-in tool loops (`provider -> tool -> provider -> done`).
 - Assistant `tool_use` parts and `tool_result` messages are persisted for replay.
 - Tool lifecycle events are published on `opencode-bus` (`ToolStarted`, `ToolFinished { ok }`).
+- Session runtime status is queryable through singular parity routes and remains limited to `idle|busy`.
+- Detached prompt requests return acceptance metadata immediately while background execution continues.
 
 Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
 
@@ -78,6 +89,12 @@ Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
 - `POST /api/v1/sessions/:sid/messages`
 - `POST /api/v1/sessions/:sid/prompt`
 - `POST /api/v1/sessions/:sid/cancel`
+- `GET /api/v1/session/status`
+- `GET /api/v1/session/:sid/status`
+- `POST /api/v1/session/:sid/abort`
+- `GET /api/v1/session/:sid/message`
+- `POST /api/v1/session/:sid/prompt`
+- `GET /api/v1/event`
 - `GET /api/v1/provider`
 - `GET /api/v1/provider/auth`
 - `POST /api/v1/provider/:provider/oauth/authorize`
@@ -91,6 +108,8 @@ Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
 ## Manual validation expectations
 
 - Use provider parity routes without harness flag for catalog/auth/account checks.
+- Use `GET /api/v1/event` for runtime SSE checks; expect a `server.connected` frame first and `server.heartbeat` while idle.
+- Use singular `/api/v1/session/*` aliases for upstream-style clients; they intentionally wrap only already-backed runtime/storage behavior.
 - OAuth flow for manual checks is two-step: authorize endpoint first, callback endpoint second.
 - Verify persistence behavior by checking `GET /api/v1/provider/account` before and after `use`/`delete` calls.
 - Use `/api/v1/provider/stream` only for raw SSE adapter validation with `OPENCODE_MANUAL_HARNESS=1`.
@@ -99,6 +118,8 @@ Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
 
 - `run`, `prompt <text>`, and `config` (without `--show`) CLI commands remain stubs.
 - Runtime tool loop is intentionally bounded: Anthropic/Google supported for tool-capable session turns; OpenAI is still text-only there.
+- `/api/v1/event` is live-only SSE in this release; it does not replay persisted history.
+- Singular session parity stays intentionally narrow: unsupported write parity like `POST /api/v1/session/:sid/message` is still not exposed.
 - OAuth pending authorization state is in-process only; server restart during auth requires re-authorize.
 - `opencode-lsp`, `opencode-mcp`, `opencode-plugin`, and `opencode-tui` remain scaffolding crates.
 - `/api/v1/provider/stream` is a **manual harness**, not a stable public API contract.
@@ -116,9 +137,9 @@ Manual endpoint guide: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md)
 
 ## Versioning
 
-- Workspace version is currently `0.8.0` (`[workspace.package]`).
+- Workspace version is currently `0.9.0` (`[workspace.package]`).
 - Crates use `version.workspace = true`, so crate versions are kept in lockstep.
-- Git tag style remains `v<semver>` (this release: `v0.8.0`).
+- Git tag style remains `v<semver>` (this release target: `v0.9.0`).
 - Until `1.0`, API and behavior may change between minor releases.
 
 ## More documentation

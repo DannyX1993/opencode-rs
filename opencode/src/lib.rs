@@ -118,6 +118,7 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
     let state = AppState {
         config: Arc::new(cfg),
         bus,
+        event_heartbeat: opencode_server::state::EventHeartbeat::default(),
         storage,
         session,
         registry,
@@ -180,6 +181,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_no_subcommand_defaults_to_run() {
         dispatch_from(&["opencode"]).await.unwrap();
+    }
+
+    #[test]
+    fn package_version_matches_next_minor_release() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.9.0");
     }
 
     // RED S.1 — `server` subcommand binds a real TCP socket and serves health
