@@ -114,6 +114,74 @@ pub(crate) fn translate_bus_event(ev: &BusEvent) -> Option<ServerEventPayload> {
                 "error": error,
             }),
         }),
+        BusEvent::PermissionAsked {
+            session_id,
+            request_id,
+            permission,
+            patterns,
+            metadata,
+            always,
+            tool,
+        } => Some(ServerEventPayload {
+            event_type: "permission.asked".into(),
+            properties: serde_json::json!({
+                "session_id": session_id,
+                "request_id": request_id,
+                "permission": permission,
+                "patterns": patterns,
+                "metadata": metadata,
+                "always": always,
+                "tool": tool,
+            }),
+        }),
+        BusEvent::PermissionReplied {
+            session_id,
+            request_id,
+            reply,
+        } => Some(ServerEventPayload {
+            event_type: "permission.replied".into(),
+            properties: serde_json::json!({
+                "session_id": session_id,
+                "request_id": request_id,
+                "reply": reply,
+            }),
+        }),
+        BusEvent::QuestionAsked {
+            session_id,
+            request_id,
+            questions,
+            tool,
+        } => Some(ServerEventPayload {
+            event_type: "question.asked".into(),
+            properties: serde_json::json!({
+                "session_id": session_id,
+                "request_id": request_id,
+                "questions": questions,
+                "tool": tool,
+            }),
+        }),
+        BusEvent::QuestionReplied {
+            session_id,
+            request_id,
+            answers,
+        } => Some(ServerEventPayload {
+            event_type: "question.replied".into(),
+            properties: serde_json::json!({
+                "session_id": session_id,
+                "request_id": request_id,
+                "answers": answers,
+            }),
+        }),
+        BusEvent::QuestionRejected {
+            session_id,
+            request_id,
+        } => Some(ServerEventPayload {
+            event_type: "question.rejected".into(),
+            properties: serde_json::json!({
+                "session_id": session_id,
+                "request_id": request_id,
+            }),
+        }),
         _ => None,
     }
 }
@@ -260,6 +328,94 @@ mod tests {
         .unwrap();
         assert_eq!(session_error.event_type, "session.error");
         assert_eq!(session_error.properties["error"], "boom");
+    }
+
+    #[test]
+    fn translate_bus_event_maps_permission_and_question_variants_without_shape_changes() {
+        let sid = SessionId::new();
+
+        let permission_asked = translate_bus_event(&BusEvent::PermissionAsked {
+            session_id: sid,
+            request_id: "perm-1".into(),
+            permission: "bash".into(),
+            patterns: vec!["/tmp/**".into()],
+            metadata: serde_json::json!({"source": "tool"}),
+            always: vec!["/tmp/**".into()],
+            tool: Some(opencode_bus::RuntimeToolCallRef {
+                message_id: MessageId::new(),
+                call_id: "call-1".into(),
+            }),
+        })
+        .unwrap();
+        assert_eq!(permission_asked.event_type, "permission.asked");
+        assert_eq!(permission_asked.properties["request_id"], "perm-1");
+        assert_eq!(permission_asked.properties["permission"], "bash");
+        assert_eq!(
+            permission_asked.properties["patterns"],
+            serde_json::json!(["/tmp/**"])
+        );
+        assert_eq!(
+            permission_asked.properties["metadata"],
+            serde_json::json!({"source": "tool"})
+        );
+        assert_eq!(
+            permission_asked.properties["always"],
+            serde_json::json!(["/tmp/**"])
+        );
+        assert_eq!(permission_asked.properties["tool"]["callID"], "call-1");
+
+        let permission_replied = translate_bus_event(&BusEvent::PermissionReplied {
+            session_id: sid,
+            request_id: "perm-1".into(),
+            reply: opencode_bus::PermissionReplyKind::Always,
+        })
+        .unwrap();
+        assert_eq!(permission_replied.event_type, "permission.replied");
+        assert_eq!(permission_replied.properties["request_id"], "perm-1");
+        assert_eq!(permission_replied.properties["reply"], "always");
+
+        let question_asked = translate_bus_event(&BusEvent::QuestionAsked {
+            session_id: sid,
+            request_id: "q-1".into(),
+            questions: vec![opencode_bus::QuestionInfo {
+                question: "Pick env".into(),
+                header: "Environment".into(),
+                options: vec![opencode_bus::QuestionOption {
+                    label: "prod".into(),
+                    description: "Production".into(),
+                }],
+                multiple: Some(false),
+                custom: Some(false),
+            }],
+            tool: None,
+        })
+        .unwrap();
+        assert_eq!(question_asked.event_type, "question.asked");
+        assert_eq!(question_asked.properties["request_id"], "q-1");
+        assert_eq!(
+            question_asked.properties["questions"][0]["question"],
+            "Pick env"
+        );
+
+        let question_replied = translate_bus_event(&BusEvent::QuestionReplied {
+            session_id: sid,
+            request_id: "q-1".into(),
+            answers: vec![vec!["prod".into()]],
+        })
+        .unwrap();
+        assert_eq!(question_replied.event_type, "question.replied");
+        assert_eq!(
+            question_replied.properties["answers"],
+            serde_json::json!([["prod"]])
+        );
+
+        let question_rejected = translate_bus_event(&BusEvent::QuestionRejected {
+            session_id: sid,
+            request_id: "q-1".into(),
+        })
+        .unwrap();
+        assert_eq!(question_rejected.event_type, "question.rejected");
+        assert_eq!(question_rejected.properties["request_id"], "q-1");
     }
 
     #[test]

@@ -45,6 +45,13 @@ The `Storage` trait currently supports:
 
 These contracts are consumed by `opencode-provider::AccountService` and surfaced through `opencode-server` provider account routes.
 
+## Permission runtime persistence behavior
+
+- `permission` repository remains one row per project.
+- Runtime `allow-always` writes are merged via normalized rule helpers (`normalize_rules`, `merge_allow_rules`).
+- Invalid permission rule entries are filtered during normalization; merged allow rules are deduplicated.
+- This allows future matching permission asks to short-circuit without creating pending runtime entries.
+
 ## Usage
 
 ```rust

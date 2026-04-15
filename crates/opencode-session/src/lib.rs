@@ -3,14 +3,16 @@
 //! Agent loop orchestration: maps user prompts to LLM streaming, tool execution,
 //! persistence, and event fan-out.
 //!
-//! Current status: runtime-core is implemented (prompt lifecycle entry,
-//! cancellation, per-session run-state, and text-delta stream projection).
-//! Full parity work (tool-use execution and richer orchestration flows) is
-//! intentionally deferred to follow-up slices.
+//! Current status: bounded runtime-core is implemented, including prompt
+//! lifecycle entry, permission/question interactive runtimes, blocked status
+//! projection, cancellation, per-session run-state, and text-delta streaming.
+//! Full parity work is intentionally deferred to follow-up slices.
 
 #![warn(missing_docs)]
 
 pub mod engine;
+pub mod permission_runtime;
+pub mod question_runtime;
 pub mod run_state;
 pub mod runtime;
 pub mod types;
@@ -26,5 +28,11 @@ mod tests {
     #[test]
     fn can_reference_provider_types_from_session_crate() {
         let _ = opencode_provider::ModelRegistry::new();
+    }
+
+    #[test]
+    fn exposes_permission_and_question_runtime_modules() {
+        let _: Option<crate::permission_runtime::InMemoryPermissionRuntime> = None;
+        let _: Option<crate::question_runtime::InMemoryQuestionRuntime> = None;
     }
 }

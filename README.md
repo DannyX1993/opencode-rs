@@ -9,7 +9,7 @@ Rust workspace for the `opencode` runtime, server surface, and core libraries.
 
 The workspace is **partially production-shaped**: core crates are functional (CLI, storage, provider adapters, HTTP routes, provider/account domain services, and session runtime core), while some user-facing surfaces remain intentionally stubbed.
 
-Current milestone reflected in this repo state: **`port-server-session-and-event-apis` (verified, release-prep)**.
+Current milestone reflected in this repo state: **`port-permission-and-question-runtime` (implemented + docs updated)**.
 
 ## Workspace Architecture (high level)
 
@@ -34,11 +34,11 @@ opencode-core provides shared DTOs/config/errors/IDs across all crates.
 | `crates/opencode-cli/` | library crate | active | Clap definitions, bootstrap, `tool` command wiring |
 | `crates/opencode-core/` | library crate | active | Shared config, DTOs, IDs, errors, tracing/context helpers |
 | `crates/opencode-provider/` | library crate | active | Runtime model adapters plus provider catalog/auth/account services |
-| `crates/opencode-server/` | library crate | active | Axum router + project/session routes, SSE event stream, and provider/config/account contracts |
+| `crates/opencode-server/` | library crate | active | Axum router + project/session routes, permission/question runtime routes, SSE event stream, and provider/config/account contracts |
 | `crates/opencode-storage/` | library crate | active | SQLite persistence, migrations, repositories, account state, event storage |
 | `crates/opencode-tool/` | library crate | active | Tool trait, registry, built-in read/list/glob/grep/write/bash tools |
-| `crates/opencode-bus/` | library crate | partial | Typed in-process broadcast bus with published lifecycle/runtime events |
-| `crates/opencode-session/` | library crate | partial | Session runtime core: prompt lifecycle, detached execution, run-state status, cancellation |
+| `crates/opencode-bus/` | library crate | partial | Typed in-process broadcast bus with lifecycle/runtime events, including permission/question ask/reply/reject |
+| `crates/opencode-session/` | library crate | partial | Session runtime core: prompt lifecycle, permission/question interactive runtimes, blocked status, detached execution, cancellation |
 | `crates/opencode-lsp/` | library crate | stub | Placeholder for future LSP integration |
 | `crates/opencode-mcp/` | library crate | stub | Placeholder for future MCP integration |
 | `crates/opencode-plugin/` | library crate | stub | Placeholder for future plugin host |
@@ -46,14 +46,15 @@ opencode-core provides shared DTOs/config/errors/IDs across all crates.
 | `docs/` | docs | active | Manual testing + architecture/runtime notes |
 | `scripts/` | scripts | active | Helper scripts (coverage, etc.) |
 
-## Session/event parity completed in this change stream
+## Permission/question runtime parity completed in this change stream
 
-The `port-server-session-and-event-apis` slice is now landed in code, docs, and tests:
+The `port-permission-and-question-runtime` slice is now landed in code, docs, and tests:
 
-- Public SSE route `GET /api/v1/event` now emits `server.connected`, idle heartbeats, and translated live runtime events in wire order.
-- Singular upstream-shaped session aliases now exist for runtime status, abort, message-list wrapper, and detached prompt execution.
-- Runtime status is sourced from in-memory `RunState` snapshots as stable `idle|busy` shapes instead of new durable tables.
-- Detached background failures can surface as `session.error` on the in-process bus and SSE layer.
+- Session runtime now includes permission and question runtimes with explicit ask/reply/reject lifecycle and in-memory pending queues.
+- Public HTTP routes now include `/api/v1/permission*` and `/api/v1/question*` for listing and resolving pending runtime prompts.
+- Runtime status now supports blocked shapes: `{ "type": "blocked", "kind": "permission|question", "requestID": "..." }`.
+- Public SSE route `GET /api/v1/event` now translates `permission.asked`, `permission.replied`, `question.asked`, `question.replied`, and `question.rejected` in addition to existing lifecycle/tool events.
+- Durable allow-always semantics are implemented by merging normalized `allow` rules into project permission storage.
 
 ## Provider/auth/account parity retained from the prior stream
 
@@ -70,7 +71,7 @@ The `port-provider-auth-and-account-parity` slice is now landed in code and test
 - Anthropic and Google session turns can complete provider-driven built-in tool loops (`provider -> tool -> provider -> done`).
 - Assistant `tool_use` parts and `tool_result` messages are persisted for replay.
 - Tool lifecycle events are published on `opencode-bus` (`ToolStarted`, `ToolFinished { ok }`).
-- Session runtime status is queryable through singular parity routes and remains limited to `idle|busy`.
+- Session runtime status is queryable through singular parity routes and now includes blocked states for permission/question waits.
 - Detached prompt requests return acceptance metadata immediately while background execution continues.
 
 Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
@@ -94,6 +95,11 @@ Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
 - `POST /api/v1/session/:sid/abort`
 - `GET /api/v1/session/:sid/message`
 - `POST /api/v1/session/:sid/prompt`
+- `GET /api/v1/permission`
+- `POST /api/v1/permission/reply`
+- `GET /api/v1/question`
+- `POST /api/v1/question/reply`
+- `POST /api/v1/question/reject`
 - `GET /api/v1/event`
 - `GET /api/v1/provider`
 - `GET /api/v1/provider/auth`
@@ -109,7 +115,9 @@ Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
 
 - Use provider parity routes without harness flag for catalog/auth/account checks.
 - Use `GET /api/v1/event` for runtime SSE checks; expect a `server.connected` frame first and `server.heartbeat` while idle.
-- Use singular `/api/v1/session/*` aliases for upstream-style clients; they intentionally wrap only already-backed runtime/storage behavior.
+- Use singular `/api/v1/session/*` aliases for upstream-style clients; status can return `idle`, `busy`, or blocked runtime objects.
+- Validate permission/question flows through `/api/v1/permission*` and `/api/v1/question*` and confirm `ok: true|false` reply contracts.
+- Validate durable allow-always behavior by approving with `always`, then re-triggering the same permission pattern and confirming it no longer appears in pending lists.
 - OAuth flow for manual checks is two-step: authorize endpoint first, callback endpoint second.
 - Verify persistence behavior by checking `GET /api/v1/provider/account` before and after `use`/`delete` calls.
 - Use `/api/v1/provider/stream` only for raw SSE adapter validation with `OPENCODE_MANUAL_HARNESS=1`.
@@ -137,9 +145,9 @@ Manual endpoint guide: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md)
 
 ## Versioning
 
-- Workspace version is currently `0.9.0` (`[workspace.package]`).
+- Workspace version is currently `0.10.0` (`[workspace.package]`).
 - Crates use `version.workspace = true`, so crate versions are kept in lockstep.
-- Git tag style remains `v<semver>` (this release target: `v0.9.0`).
+- Git tag style remains `v<semver>` (this release target: `v0.10.0`).
 - Until `1.0`, API and behavior may change between minor releases.
 
 ## More documentation

@@ -3,6 +3,56 @@
 use opencode_core::id::{MessageId, PartId, ProjectId, SessionId};
 use serde::{Deserialize, Serialize};
 
+/// Optional linkage between a runtime prompt and the originating tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeToolCallRef {
+    /// Message that owns the tool call.
+    #[serde(rename = "messageID")]
+    pub message_id: MessageId,
+    /// Tool call correlation id.
+    #[serde(rename = "callID")]
+    pub call_id: String,
+}
+
+/// Reply mode for permission prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionReplyKind {
+    /// Approve this request once.
+    Once,
+    /// Persist approval for future matches.
+    Always,
+    /// Reject the request.
+    Reject,
+}
+
+/// Runtime question option displayed to users.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    /// Short option label.
+    pub label: String,
+    /// Option description.
+    pub description: String,
+}
+
+/// Runtime question metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionInfo {
+    /// Complete user-visible question.
+    pub question: String,
+    /// Short header used in compact UIs.
+    pub header: String,
+    /// Available answer options.
+    pub options: Vec<QuestionOption>,
+    /// Whether multiple options may be selected.
+    #[serde(default)]
+    pub multiple: Option<bool>,
+    /// Whether free-form custom answers are allowed.
+    #[serde(default)]
+    pub custom: Option<bool>,
+}
+
 /// Discriminant for fast `subscribe_kind` filtering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -125,14 +175,60 @@ pub enum BusEvent {
     },
 
     // ── Permissions ────────────────────────────────────────────────────────
-    /// The user must approve or deny a tool call.
-    PermissionRequested {
-        /// Session.
+    /// A permission request was raised and is now waiting for a reply.
+    PermissionAsked {
+        /// Session owning the pending request.
         session_id: SessionId,
-        /// Tool name requesting permission.
-        tool: String,
-        /// Call id for the reply channel lookup.
-        call_id: String,
+        /// Runtime request id.
+        request_id: String,
+        /// Permission name (for example `bash`).
+        permission: String,
+        /// Permission patterns being requested.
+        patterns: Vec<String>,
+        /// Additional metadata associated with the request.
+        metadata: serde_json::Value,
+        /// Patterns eligible for durable `always` approval.
+        always: Vec<String>,
+        /// Optional originating tool linkage.
+        #[serde(default)]
+        tool: Option<RuntimeToolCallRef>,
+    },
+    /// A pending permission request received a reply.
+    PermissionReplied {
+        /// Session owning the request.
+        session_id: SessionId,
+        /// Runtime request id.
+        request_id: String,
+        /// Reply mode selected by the client.
+        reply: PermissionReplyKind,
+    },
+    /// A question request was raised and is now waiting for a reply.
+    QuestionAsked {
+        /// Session owning the pending request.
+        session_id: SessionId,
+        /// Runtime request id.
+        request_id: String,
+        /// Ordered runtime questions.
+        questions: Vec<QuestionInfo>,
+        /// Optional originating tool linkage.
+        #[serde(default)]
+        tool: Option<RuntimeToolCallRef>,
+    },
+    /// A question request received answers.
+    QuestionReplied {
+        /// Session owning the request.
+        session_id: SessionId,
+        /// Runtime request id.
+        request_id: String,
+        /// Answers preserving the original question order.
+        answers: Vec<Vec<String>>,
+    },
+    /// A pending question request was explicitly rejected.
+    QuestionRejected {
+        /// Session owning the request.
+        session_id: SessionId,
+        /// Runtime request id.
+        request_id: String,
     },
 
     // ── Todos ──────────────────────────────────────────────────────────────
@@ -165,7 +261,11 @@ impl BusEvent {
 
             Self::ProviderTokensUsed { .. } => EventKind::Provider,
 
-            Self::PermissionRequested { .. } => EventKind::Permission,
+            Self::PermissionAsked { .. }
+            | Self::PermissionReplied { .. }
+            | Self::QuestionAsked { .. }
+            | Self::QuestionReplied { .. }
+            | Self::QuestionRejected { .. } => EventKind::Permission,
 
             Self::TodosUpdated { .. } => EventKind::Todo,
 
@@ -290,10 +390,59 @@ mod tests {
             EventKind::Provider
         );
         assert_eq!(
-            BusEvent::PermissionRequested {
+            BusEvent::PermissionAsked {
                 session_id: sid(),
-                tool: "bash".into(),
-                call_id: "c1".into()
+                request_id: "perm_1".into(),
+                permission: "bash".into(),
+                patterns: vec!["git:*".into()],
+                metadata: serde_json::json!({"reason": "repo"}),
+                always: vec!["git:status".into()],
+                tool: None,
+            }
+            .kind(),
+            EventKind::Permission
+        );
+        assert_eq!(
+            BusEvent::PermissionReplied {
+                session_id: sid(),
+                request_id: "perm_1".into(),
+                reply: PermissionReplyKind::Always,
+            }
+            .kind(),
+            EventKind::Permission
+        );
+        assert_eq!(
+            BusEvent::QuestionAsked {
+                session_id: sid(),
+                request_id: "q_1".into(),
+                questions: vec![QuestionInfo {
+                    question: "Continue?".into(),
+                    header: "Continue".into(),
+                    options: vec![QuestionOption {
+                        label: "Yes".into(),
+                        description: "Continue run".into(),
+                    }],
+                    multiple: Some(false),
+                    custom: Some(true),
+                }],
+                tool: None,
+            }
+            .kind(),
+            EventKind::Permission
+        );
+        assert_eq!(
+            BusEvent::QuestionReplied {
+                session_id: sid(),
+                request_id: "q_1".into(),
+                answers: vec![vec!["Yes".into()]],
+            }
+            .kind(),
+            EventKind::Permission
+        );
+        assert_eq!(
+            BusEvent::QuestionRejected {
+                session_id: sid(),
+                request_id: "q_1".into(),
             }
             .kind(),
             EventKind::Permission

@@ -13,4 +13,6 @@ mod bus;
 mod event;
 
 pub use bus::{BroadcastBus, BusError, EventBus};
-pub use event::{BusEvent, EventKind};
+pub use event::{
+    BusEvent, EventKind, PermissionReplyKind, QuestionInfo, QuestionOption, RuntimeToolCallRef,
+};

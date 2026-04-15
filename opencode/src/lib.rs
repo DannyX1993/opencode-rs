@@ -67,7 +67,10 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
         ModelRegistry, OpenAiProvider, ProviderAuthService, ProviderCatalogService,
     };
     use opencode_server::{AppState, build, serve};
-    use opencode_session::engine::SessionEngine;
+    use opencode_session::{
+        engine::SessionEngine, permission_runtime::InMemoryPermissionRuntime,
+        question_runtime::InMemoryQuestionRuntime,
+    };
     use opencode_storage::{StorageImpl, connect};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -100,11 +103,20 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
     }
 
     let default_model = cfg.model.clone();
-    let session = Arc::new(SessionEngine::new(
+    let permission_runtime: Arc<dyn opencode_session::permission_runtime::PermissionRuntime> =
+        Arc::new(InMemoryPermissionRuntime::new(
+            Arc::clone(&storage),
+            Arc::clone(&bus),
+        ));
+    let question_runtime: Arc<dyn opencode_session::question_runtime::QuestionRuntime> =
+        Arc::new(InMemoryQuestionRuntime::new(Arc::clone(&bus)));
+    let session = Arc::new(SessionEngine::with_runtimes(
         Arc::clone(&storage),
         Arc::clone(&bus),
         Arc::clone(&registry),
         default_model,
+        Arc::clone(&permission_runtime),
+        Arc::clone(&question_runtime),
     ));
     let models = CatalogCache::default_url(cwd.join(".opencode/models.json"))
         .load_cached()
@@ -121,6 +133,8 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
         event_heartbeat: opencode_server::state::EventHeartbeat::default(),
         storage,
         session,
+        permission_runtime,
+        question_runtime,
         registry,
         provider_catalog,
         provider_auth,
@@ -185,7 +199,7 @@ mod tests {
 
     #[test]
     fn package_version_matches_next_minor_release() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.9.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.10.0");
     }
 
     // RED S.1 — `server` subcommand binds a real TCP socket and serves health

@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 use crate::{
-    routes::{config, event, project, provider, session},
+    routes::{config, event, permission, project, provider, question, session},
     state::AppState,
 };
 use opencode_core::error::ServerError;
@@ -16,6 +16,7 @@ use opencode_core::error::ServerError;
 /// `/health` is the liveness probe.
 /// `/api/v1/projects` and session/message routes expose storage-backed REST APIs.
 /// `/api/v1/sessions/:sid/prompt|cancel` call into the session runtime.
+/// `/api/v1/permission*` and `/api/v1/question*` expose pending interactive runtime flows.
 /// `/api/v1/provider/stream` is a manual harness route gated by env config.
 pub fn build(state: AppState) -> Router {
     let api = Router::new()
@@ -59,6 +60,11 @@ pub fn build(state: AppState) -> Router {
             "/provider/account/{account_id}",
             axum::routing::delete(provider::remove_account),
         )
+        .route("/permission", get(permission::list))
+        .route("/permission/reply", post(permission::reply))
+        .route("/question", get(question::list))
+        .route("/question/reply", post(question::reply))
+        .route("/question/reject", post(question::reject))
         .route("/config/providers", get(config::providers))
         .route("/event", get(event::stream))
         // Manual provider harness (Phase 2 — env-gated)
@@ -260,12 +266,22 @@ mod tests {
     fn state() -> AppState {
         let storage: Arc<dyn Storage> = Arc::new(StubStorage);
         let cfg = Config::default();
+        let bus = Arc::new(BroadcastBus::new(64));
         AppState {
             config: Arc::new(cfg.clone()),
-            bus: Arc::new(BroadcastBus::new(64)),
+            bus: Arc::clone(&bus),
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session: Arc::new(StubSession),
+            permission_runtime: Arc::new(
+                opencode_session::permission_runtime::InMemoryPermissionRuntime::new(
+                    Arc::clone(&storage),
+                    Arc::clone(&bus),
+                ),
+            ),
+            question_runtime: Arc::new(
+                opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
+            ),
             registry: Arc::new(ModelRegistry::new()),
             provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
             provider_auth: Arc::new(ProviderAuthService::new()),
@@ -841,5 +857,76 @@ mod tests {
         assert!(body_str.contains("\"type\":\"message.added\""));
         assert!(body_str.contains(&format!("\"session_id\":\"{sid}\"")));
         assert!(body_str.contains(&format!("\"message_id\":\"{mid}\"")));
+    }
+
+    #[tokio::test]
+    async fn instance_event_route_streams_permission_and_question_payloads() {
+        let state = state();
+        let bus = std::sync::Arc::clone(&state.bus);
+        let app = build(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/event")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut stream = resp.into_body().into_data_stream();
+        let _ = read_sse_frame(&mut stream).await;
+        let sid = SessionId::new();
+
+        let _ = bus.publish(BusEvent::PermissionAsked {
+            session_id: sid,
+            request_id: "perm-sse".into(),
+            permission: "bash".into(),
+            patterns: vec!["/tmp/**".into()],
+            metadata: serde_json::json!({"source": "router-test"}),
+            always: vec!["/tmp/**".into()],
+            tool: None,
+        });
+        let permission_frame = read_sse_frame(&mut stream).await;
+        assert!(permission_frame.contains("\"type\":\"permission.asked\""));
+        assert!(permission_frame.contains("\"request_id\":\"perm-sse\""));
+
+        let _ = bus.publish(BusEvent::QuestionRejected {
+            session_id: sid,
+            request_id: "q-sse".into(),
+        });
+        let question_frame = read_sse_frame(&mut stream).await;
+        assert!(question_frame.contains("\"type\":\"question.rejected\""));
+        assert!(question_frame.contains("\"request_id\":\"q-sse\""));
+    }
+
+    #[tokio::test]
+    async fn permission_and_question_routes_are_registered() {
+        let app = build(state());
+
+        let permission_list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/permission")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(permission_list.status(), StatusCode::NOT_FOUND);
+
+        let question_list = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/question")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(question_list.status(), StatusCode::NOT_FOUND);
     }
 }

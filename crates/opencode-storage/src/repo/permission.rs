@@ -2,6 +2,18 @@
 
 use opencode_core::{dto::PermissionRow, error::StorageError, id::ProjectId};
 use sqlx::{Row, SqlitePool};
+use std::collections::HashSet;
+
+/// Normalized permission rule used by runtime persistence helpers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PermissionRule {
+    /// Permission category.
+    pub permission: String,
+    /// Wildcard pattern associated with the permission.
+    pub pattern: String,
+    /// Rule action (`allow`, `deny`, or `ask`).
+    pub action: String,
+}
 
 fn map(e: sqlx::Error) -> StorageError {
     StorageError::Db(e.to_string())
@@ -48,6 +60,77 @@ pub async fn set(pool: &SqlitePool, row: &PermissionRow) -> Result<(), StorageEr
     .await
     .map_err(map)?;
     Ok(())
+}
+
+/// Normalize arbitrary JSON permission data into deduplicated valid rules.
+#[must_use]
+pub fn normalize_rules(data: &serde_json::Value) -> Vec<PermissionRule> {
+    let Some(items) = data.as_array() else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        let Some(permission) = item.get("permission").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(pattern) = item.get("pattern").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(action) = item.get("action").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !matches!(action, "allow" | "deny" | "ask") {
+            continue;
+        }
+
+        let rule = PermissionRule {
+            permission: permission.to_string(),
+            pattern: pattern.to_string(),
+            action: action.to_string(),
+        };
+        if seen.insert(rule.clone()) {
+            out.push(rule);
+        }
+    }
+
+    out
+}
+
+/// Merge durable `allow` rules for `permission` and dedupe resulting rows.
+#[must_use]
+pub fn merge_allow_rules(
+    existing: &serde_json::Value,
+    permission: &str,
+    patterns: &[String],
+) -> serde_json::Value {
+    let mut rules = normalize_rules(existing);
+    let mut seen: HashSet<PermissionRule> = rules.iter().cloned().collect();
+
+    for pattern in patterns {
+        let next = PermissionRule {
+            permission: permission.to_string(),
+            pattern: pattern.clone(),
+            action: "allow".to_string(),
+        };
+        if seen.insert(next.clone()) {
+            rules.push(next);
+        }
+    }
+
+    serde_json::Value::Array(
+        rules
+            .into_iter()
+            .map(|item| {
+                serde_json::json!({
+                    "permission": item.permission,
+                    "pattern": item.pattern,
+                    "action": item.action,
+                })
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -133,5 +216,43 @@ mod tests {
         let missing = ProjectId::new();
         let result = get(&pool, missing).await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn normalize_rules_filters_invalid_entries() {
+        let normalized = normalize_rules(&serde_json::json!([
+            {"permission": "bash", "pattern": "git:*", "action": "allow"},
+            {"permission": "bash", "pattern": "git:*", "action": "allow"},
+            {"permission": "bash", "pattern": 12, "action": "allow"},
+            {"permission": "read", "pattern": "secret:*", "action": "deny"},
+            {"permission": "bash", "pattern": "rm:*", "action": "maybe"}
+        ]));
+
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[0].permission, "bash");
+        assert_eq!(normalized[0].pattern, "git:*");
+        assert_eq!(normalized[0].action, "allow");
+        assert_eq!(normalized[1].action, "deny");
+    }
+
+    #[test]
+    fn merge_allow_rules_adds_unique_allow_entries() {
+        let merged = merge_allow_rules(
+            &serde_json::json!([
+                {"permission": "bash", "pattern": "git:status", "action": "allow"},
+                {"permission": "bash", "pattern": "rm:*", "action": "deny"}
+            ]),
+            "bash",
+            &["git:status".into(), "git:commit".into()],
+        );
+
+        assert_eq!(
+            merged,
+            serde_json::json!([
+                {"permission": "bash", "pattern": "git:status", "action": "allow"},
+                {"permission": "bash", "pattern": "rm:*", "action": "deny"},
+                {"permission": "bash", "pattern": "git:commit", "action": "allow"}
+            ])
+        );
     }
 }

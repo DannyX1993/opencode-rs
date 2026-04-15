@@ -10,15 +10,15 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 
 | Crate | Status | Purpose |
 | --- | --- | --- |
-| [`opencode-bus`](opencode-bus) | partial | Typed broadcast bus and shared event enums, including runtime/SSE-facing session failures |
+| [`opencode-bus`](opencode-bus) | partial | Typed broadcast bus and shared event enums, including permission/question runtime events and session failures |
 | [`opencode-cli`](opencode-cli) | active | Clap CLI types, bootstrap flow, `tool` command dispatch |
 | [`opencode-core`](opencode-core) | active | Shared DTOs, config, IDs, errors, tracing |
 | [`opencode-lsp`](opencode-lsp) | stub | Placeholder for future LSP integration |
 | [`opencode-mcp`](opencode-mcp) | stub | Placeholder for future MCP integration |
 | [`opencode-plugin`](opencode-plugin) | stub | Placeholder for future plugin hosting |
 | [`opencode-provider`](opencode-provider) | active | Runtime adapters plus provider catalog/auth/account domain services |
-| [`opencode-server`](opencode-server) | active | Axum router and HTTP endpoints, including SSE event stream and session/provider parity routes |
-| [`opencode-session`](opencode-session) | partial | Bounded session runtime loop (`prompt`, `prompt_detached`, `status`, `cancel`, history replay, tool persistence, run-state) |
+| [`opencode-server`](opencode-server) | active | Axum router and HTTP endpoints, including SSE, session/provider parity routes, and permission/question runtime APIs |
+| [`opencode-session`](opencode-session) | partial | Bounded session runtime loop (`prompt`, `prompt_detached`, `status`, `cancel`) plus permission/question runtimes and blocked status tracking |
 | [`opencode-storage`](opencode-storage) | active | SQLite persistence and repositories including account active-state support |
 | [`opencode-tool`](opencode-tool) | active | Tool runtime, built-in file/shell tools, and provider-facing tool metadata |
 | [`opencode-tui`](opencode-tui) | stub | Placeholder for future terminal UI |
@@ -31,14 +31,15 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 
 Current notable `partial` crate details:
 
-- `opencode-session` now includes the bounded Anthropic/Google runtime tool loop, detached prompt acceptance, and `idle|busy` runtime snapshots, but broader parity items (OpenAI tool execution, approval flows, richer UI/event contracts) remain deferred.
-- `opencode-bus` now includes `SessionError` so detached background failures can be observed without changing the storage model.
+- `opencode-session` now includes bounded Anthropic/Google tool-loop execution, detached prompt acceptance, permission/question ask-reply runtimes, and blocked runtime status snapshots.
+- `opencode-bus` now includes `SessionError` plus permission/question ask/reply/reject events used by the SSE surface.
 
-Current notable `active` crate updates in `v0.9.0`:
+Current notable `active` crate updates in `v0.10.0`:
 
 - `opencode-provider` now owns provider metadata catalog filtering, auth-method discovery, and account-domain composition.
 - `opencode-server` now exposes public provider/account/config contracts (`/api/v1/provider*`, `/api/v1/config/providers`) alongside the manual stream harness.
 - `opencode-server` also exposes `GET /api/v1/event` plus singular `/api/v1/session/*` aliases for status, abort, message reads, and detached prompt parity.
+- `opencode-server` also exposes `/api/v1/permission*` and `/api/v1/question*` routes for interactive runtime gating.
 - `opencode-storage` now exposes richer account/account_state helpers used by provider/account services.
 
 ## Build And Test

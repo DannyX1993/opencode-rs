@@ -23,7 +23,11 @@ use std::{
 
 use crate::run_state::RunState;
 use crate::runtime;
-use crate::types::{DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus};
+use crate::types::{
+    DetachedPromptAccepted, PermissionReply, PermissionReplyKind, PermissionRequest, QuestionInfo,
+    QuestionOption, QuestionRequest, RuntimeToolCallRef, SessionBlockedKind, SessionHandle,
+    SessionPrompt, SessionRuntimeStatus,
+};
 
 /// The session engine abstraction.
 ///
@@ -50,12 +54,18 @@ pub trait Session: Send + Sync {
 
     /// Cancel an in-progress prompt turn.
     ///
+    /// Implementations may also resolve pending interactive runtime requests
+    /// (permission/question) for the same session.
+    ///
     /// # Errors
     ///
     /// Returns [`SessionError::NoActiveRun`] if no active turn exists.
     async fn cancel(&self, session_id: SessionId) -> Result<(), SessionError>;
 
     /// Read current runtime occupancy for one session.
+    ///
+    /// Status may be `idle`, `busy`, or `blocked` when waiting on permission
+    /// or question runtime input.
     ///
     /// # Errors
     ///
@@ -64,7 +74,7 @@ pub trait Session: Send + Sync {
 
     /// List currently active runtime statuses.
     ///
-    /// Implementations may return only non-idle entries.
+    /// Implementations may return only non-idle entries and blocked sessions.
     async fn list_statuses(&self)
     -> Result<HashMap<SessionId, SessionRuntimeStatus>, SessionError>;
 }
@@ -76,6 +86,8 @@ pub struct SessionEngine {
     registry: Arc<ModelRegistry>,
     default_model: Option<String>,
     runs: Arc<RunState>,
+    permission_runtime: Arc<dyn crate::permission_runtime::PermissionRuntime>,
+    question_runtime: Arc<dyn crate::question_runtime::QuestionRuntime>,
 }
 
 impl SessionEngine {
@@ -87,12 +99,43 @@ impl SessionEngine {
         registry: Arc<ModelRegistry>,
         default_model: Option<String>,
     ) -> Self {
+        let permission_runtime: Arc<dyn crate::permission_runtime::PermissionRuntime> =
+            Arc::new(crate::permission_runtime::InMemoryPermissionRuntime::new(
+                Arc::clone(&storage),
+                Arc::clone(&bus),
+            ));
+        let question_runtime: Arc<dyn crate::question_runtime::QuestionRuntime> = Arc::new(
+            crate::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
+        );
+
+        Self::with_runtimes(
+            storage,
+            bus,
+            registry,
+            default_model,
+            permission_runtime,
+            question_runtime,
+        )
+    }
+
+    /// Construct a [`SessionEngine`] with externally supplied runtime services.
+    #[must_use]
+    pub fn with_runtimes(
+        storage: Arc<dyn Storage>,
+        bus: Arc<BroadcastBus>,
+        registry: Arc<ModelRegistry>,
+        default_model: Option<String>,
+        permission_runtime: Arc<dyn crate::permission_runtime::PermissionRuntime>,
+        question_runtime: Arc<dyn crate::question_runtime::QuestionRuntime>,
+    ) -> Self {
         Self {
             storage,
             bus,
             registry,
             default_model,
             runs: Arc::new(RunState::default()),
+            permission_runtime,
+            question_runtime,
         }
     }
 }
@@ -254,6 +297,41 @@ impl Session for SessionEngine {
                             )));
                         }
 
+                        let tool_ref = RuntimeToolCallRef {
+                            message_id: assistant_message_id,
+                            call_id: id.clone(),
+                        };
+
+                        let permission_patterns = permission_patterns_for_tool_call(&name, &input);
+                        self.permission_runtime
+                            .ask(PermissionRequest {
+                                id: format!("permission-{id}"),
+                                session_id: req.session_id,
+                                permission: name.clone(),
+                                patterns: permission_patterns.clone(),
+                                metadata: serde_json::json!({
+                                    "source": "tool_loop",
+                                    "tool": name,
+                                    "input": input,
+                                }),
+                                always: permission_patterns,
+                                tool: Some(tool_ref.clone()),
+                            })
+                            .await?;
+
+                        let mut invocation_input = input;
+                        if let Some(questions) = take_runtime_questions(&mut invocation_input)? {
+                            let _answers = self
+                                .question_runtime
+                                .ask(QuestionRequest {
+                                    id: format!("question-{id}"),
+                                    session_id: req.session_id,
+                                    questions,
+                                    tool: Some(tool_ref.clone()),
+                                })
+                                .await?;
+                        }
+
                         let _ = self.bus.publish(BusEvent::ToolStarted {
                             session_id: req.session_id,
                             tool: name.clone(),
@@ -265,7 +343,7 @@ impl Session for SessionEngine {
                                 .invoke(ToolCall {
                                     id: id.clone(),
                                     name: name.clone(),
-                                    args: input,
+                                    args: invocation_input,
                                 })
                                 .await
                             {
@@ -329,6 +407,8 @@ impl Session for SessionEngine {
             registry: Arc::clone(&self.registry),
             default_model: self.default_model.clone(),
             runs: Arc::clone(&self.runs),
+            permission_runtime: Arc::clone(&self.permission_runtime),
+            question_runtime: Arc::clone(&self.question_runtime),
         };
 
         let accepted_session_id = accepted.session_id;
@@ -348,7 +428,38 @@ impl Session for SessionEngine {
     }
 
     async fn cancel(&self, session_id: SessionId) -> Result<(), SessionError> {
-        if self.runs.cancel(session_id).await {
+        let mut handled_pending = false;
+
+        for pending in self
+            .permission_runtime
+            .list()
+            .await?
+            .into_iter()
+            .filter(|pending| pending.session_id == session_id)
+        {
+            handled_pending = true;
+            let _ = self
+                .permission_runtime
+                .reply(PermissionReply {
+                    session_id,
+                    request_id: pending.id,
+                    reply: PermissionReplyKind::Reject,
+                })
+                .await?;
+        }
+
+        for pending in self
+            .question_runtime
+            .list()
+            .await?
+            .into_iter()
+            .filter(|pending| pending.session_id == session_id)
+        {
+            handled_pending = true;
+            let _ = self.question_runtime.reject(pending.id).await?;
+        }
+
+        if self.runs.cancel(session_id).await || handled_pending {
             Ok(())
         } else {
             Err(SessionError::NoActiveRun(session_id.to_string()))
@@ -367,6 +478,9 @@ impl Session for SessionEngine {
         }
 
         let snapshot = self.runs.snapshot(session_id).await;
+        if let Some(blocked) = self.blocked_status_for_session(session_id).await? {
+            return Ok(blocked);
+        }
         if snapshot.is_active {
             Ok(SessionRuntimeStatus::Busy)
         } else {
@@ -381,7 +495,63 @@ impl Session for SessionEngine {
         for session_id in self.runs.list_active_sessions().await {
             statuses.insert(session_id, SessionRuntimeStatus::Busy);
         }
+
+        for pending in self.permission_runtime.list().await? {
+            statuses.insert(
+                pending.session_id,
+                SessionRuntimeStatus::Blocked {
+                    kind: SessionBlockedKind::Permission,
+                    request_id: pending.id,
+                },
+            );
+        }
+
+        for pending in self.question_runtime.list().await? {
+            statuses.insert(
+                pending.session_id,
+                SessionRuntimeStatus::Blocked {
+                    kind: SessionBlockedKind::Question,
+                    request_id: pending.id,
+                },
+            );
+        }
+
         Ok(statuses)
+    }
+}
+
+impl SessionEngine {
+    async fn blocked_status_for_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SessionRuntimeStatus>, SessionError> {
+        if let Some(pending) = self
+            .permission_runtime
+            .list()
+            .await?
+            .into_iter()
+            .find(|pending| pending.session_id == session_id)
+        {
+            return Ok(Some(SessionRuntimeStatus::Blocked {
+                kind: SessionBlockedKind::Permission,
+                request_id: pending.id,
+            }));
+        }
+
+        if let Some(pending) = self
+            .question_runtime
+            .list()
+            .await?
+            .into_iter()
+            .find(|pending| pending.session_id == session_id)
+        {
+            return Ok(Some(SessionRuntimeStatus::Blocked {
+                kind: SessionBlockedKind::Question,
+                request_id: pending.id,
+            }));
+        }
+
+        Ok(None)
     }
 }
 
@@ -395,6 +565,120 @@ fn provider_supports_runtime_tools(provider_id: &str) -> bool {
     // Bounded MVP gate: only providers whose adapters can round-trip persisted tool history
     // without lossy replay are allowed into the runtime tool loop.
     matches!(provider_id, "anthropic" | "google")
+}
+
+fn permission_patterns_for_tool_call(name: &str, input: &serde_json::Value) -> Vec<String> {
+    if name == "bash"
+        && let Some(command) = input.get("command").and_then(serde_json::Value::as_str)
+    {
+        return vec![format!("bash:{command}")];
+    }
+
+    vec![format!("{name}:*")]
+}
+
+fn take_runtime_questions(
+    input: &mut serde_json::Value,
+) -> Result<Option<Vec<QuestionInfo>>, SessionError> {
+    let Some(map) = input.as_object_mut() else {
+        return Ok(None);
+    };
+
+    let Some(payload) = map.remove("_opencode_question") else {
+        return Ok(None);
+    };
+
+    let questions = payload
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SessionError::RuntimeInternal(
+                "_opencode_question payload must include a questions array".into(),
+            )
+        })?;
+
+    let parsed = questions
+        .iter()
+        .enumerate()
+        .map(|(index, value)| parse_runtime_question_info(index, value))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(parsed))
+}
+
+fn parse_runtime_question_info(
+    index: usize,
+    value: &serde_json::Value,
+) -> Result<QuestionInfo, SessionError> {
+    let question = value
+        .get("question")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            SessionError::RuntimeInternal(format!(
+                "question entry {index} missing string field 'question'"
+            ))
+        })?
+        .to_string();
+
+    let header = value
+        .get("header")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            SessionError::RuntimeInternal(format!(
+                "question entry {index} missing string field 'header'"
+            ))
+        })?
+        .to_string();
+
+    let options = value
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SessionError::RuntimeInternal(format!(
+                "question entry {index} missing array field 'options'"
+            ))
+        })?
+        .iter()
+        .enumerate()
+        .map(|(opt_index, option)| parse_runtime_question_option(index, opt_index, option))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let multiple = value.get("multiple").and_then(serde_json::Value::as_bool);
+    let custom = value.get("custom").and_then(serde_json::Value::as_bool);
+
+    Ok(QuestionInfo {
+        question,
+        header,
+        options,
+        multiple,
+        custom,
+    })
+}
+
+fn parse_runtime_question_option(
+    question_index: usize,
+    option_index: usize,
+    value: &serde_json::Value,
+) -> Result<QuestionOption, SessionError> {
+    let label = value
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            SessionError::RuntimeInternal(format!(
+                "question entry {question_index} option {option_index} missing string field 'label'"
+            ))
+        })?
+        .to_string();
+    let description = value
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            SessionError::RuntimeInternal(format!(
+                "question entry {question_index} option {option_index} missing string field 'description'"
+            ))
+        })?
+        .to_string();
+
+    Ok(QuestionOption { label, description })
 }
 
 fn history_to_model_messages(history: &[MessageWithParts]) -> Vec<ModelMessage> {
@@ -492,6 +776,7 @@ mod tests {
     use opencode_storage::{Storage, StorageImpl, connect};
     use std::sync::Arc;
     use tempfile::NamedTempFile;
+    use tokio::time::{Duration, sleep};
 
     enum StubMode {
         Done,
@@ -515,6 +800,10 @@ mod tests {
     struct ToolLoopSecondPassPendingProvider {
         calls: std::sync::Mutex<usize>,
         second_pass_started: Arc<tokio::sync::Notify>,
+    }
+
+    struct ToolLoopQuestionProvider {
+        calls: std::sync::Mutex<usize>,
     }
 
     impl StubProvider {
@@ -568,6 +857,14 @@ mod tests {
             Self {
                 calls: std::sync::Mutex::new(0),
                 second_pass_started,
+            }
+        }
+    }
+
+    impl ToolLoopQuestionProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(0),
             }
         }
     }
@@ -809,6 +1106,72 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl LanguageModel for ToolLoopQuestionProvider {
+        fn provider(&self) -> &'static str {
+            "anthropic"
+        }
+
+        async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![ModelInfo {
+                id: "anthropic/test-model".into(),
+                name: "Test".into(),
+                context_window: 8_000,
+                max_output: 1_000,
+                vision: false,
+            }])
+        }
+
+        async fn stream(
+            &self,
+            req: ModelRequest,
+        ) -> Result<BoxStream<Result<ModelEvent, ProviderError>>, ProviderError> {
+            let mut guard = self.calls.lock().unwrap();
+            let call = *guard;
+            *guard += 1;
+            drop(guard);
+
+            if call == 0 {
+                assert!(
+                    !req.tools.is_empty(),
+                    "expected tool declarations on first pass"
+                );
+                return Ok(Box::pin(stream::iter([
+                    Ok(ModelEvent::ToolUseStart {
+                        id: "call_question_1".into(),
+                        name: "bash".into(),
+                        thought_signature: None,
+                    }),
+                    Ok(ModelEvent::ToolUseInputDelta {
+                        id: "call_question_1".into(),
+                        delta: "{\"command\":\"echo hi\",\"description\":\"Echo\",\"_opencode_question\":{\"questions\":[{\"question\":\"Pick environment\",\"header\":\"Env\",\"options\":[{\"label\":\"dev\",\"description\":\"Development\"}],\"multiple\":false,\"custom\":false}]}}".into(),
+                    }),
+                    Ok(ModelEvent::ToolUseEnd {
+                        id: "call_question_1".into(),
+                    }),
+                ])));
+            }
+
+            assert!(
+                req.messages.iter().any(|m| {
+                    m.content
+                        .iter()
+                        .any(|p| matches!(p, ContentPart::ToolResult { .. }))
+                }),
+                "expected replayed tool_result on second pass"
+            );
+
+            Ok(Box::pin(stream::iter([
+                Ok(ModelEvent::TextDelta {
+                    delta: "question-done".into(),
+                }),
+                Ok(ModelEvent::Done {
+                    reason: "stop".into(),
+                }),
+            ])))
+        }
+    }
+
     async fn make_storage() -> (Arc<dyn Storage>, NamedTempFile) {
         let file = NamedTempFile::new().unwrap();
         let pool = connect(file.path()).await.unwrap();
@@ -856,6 +1219,58 @@ mod tests {
         }
     }
 
+    fn question_request(session_id: SessionId, request_id: &str) -> crate::types::QuestionRequest {
+        crate::types::QuestionRequest {
+            id: request_id.into(),
+            session_id,
+            questions: vec![crate::types::QuestionInfo {
+                question: "Pick one".into(),
+                header: "Question".into(),
+                options: vec![crate::types::QuestionOption {
+                    label: "a".into(),
+                    description: "Option A".into(),
+                }],
+                multiple: Some(false),
+                custom: Some(false),
+            }],
+            tool: None,
+        }
+    }
+
+    async fn wait_for_pending_question_count(engine: &SessionEngine, expected: usize) {
+        for _ in 0..50 {
+            if engine
+                .question_runtime
+                .list()
+                .await
+                .expect("list pending questions")
+                .len()
+                == expected
+            {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for pending question count {expected}");
+    }
+
+    async fn wait_for_pending_permission_count(engine: &SessionEngine, expected: usize) {
+        for _ in 0..50 {
+            if engine
+                .permission_runtime
+                .list()
+                .await
+                .expect("list pending permissions")
+                .len()
+                == expected
+            {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for pending permission count {expected}");
+    }
+
     async fn build_engine(
         storage: Arc<dyn Storage>,
         provider: Arc<dyn LanguageModel>,
@@ -870,6 +1285,77 @@ mod tests {
             registry,
             default_model,
         )
+    }
+
+    #[tokio::test]
+    async fn with_runtimes_uses_shared_runtime_instances_for_status_visibility() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let bus = Arc::new(BroadcastBus::default_capacity());
+        let permission_runtime: Arc<dyn crate::permission_runtime::PermissionRuntime> =
+            Arc::new(crate::permission_runtime::InMemoryPermissionRuntime::new(
+                Arc::clone(&storage),
+                Arc::clone(&bus),
+            ));
+        let question_runtime: Arc<dyn crate::question_runtime::QuestionRuntime> = Arc::new(
+            crate::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
+        );
+
+        let registry = Arc::new(ModelRegistry::new());
+        registry
+            .register("stub", Arc::new(StubProvider::pending()))
+            .await;
+
+        let engine = SessionEngine::with_runtimes(
+            Arc::clone(&storage),
+            Arc::clone(&bus),
+            registry,
+            Some("stub/test-model".into()),
+            Arc::clone(&permission_runtime),
+            Arc::clone(&question_runtime),
+        );
+
+        let ask_task = tokio::spawn({
+            let question_runtime = Arc::clone(&question_runtime);
+            async move {
+                question_runtime
+                    .ask(question_request(session_id, "shared_question"))
+                    .await
+            }
+        });
+
+        wait_for_pending_question_count(&engine, 1).await;
+        let status = engine.status(session_id).await.unwrap();
+        assert_eq!(
+            status,
+            SessionRuntimeStatus::Blocked {
+                kind: crate::types::SessionBlockedKind::Question,
+                request_id: "shared_question".into(),
+            }
+        );
+
+        question_runtime
+            .reply(crate::types::QuestionReply {
+                session_id,
+                request_id: "shared_question".into(),
+                answers: vec![vec!["a".into()]],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ask_task.await.unwrap().unwrap(),
+            vec![vec![String::from("a")]]
+        );
     }
 
     #[tokio::test]
@@ -1238,6 +1724,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_and_list_statuses_report_blocked_question_requests() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let engine = Arc::new(
+            build_engine(
+                Arc::clone(&storage),
+                Arc::new(StubProvider::done()),
+                Some("stub/test-model".into()),
+            )
+            .await,
+        );
+
+        let waiter = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .question_runtime
+                    .ask(question_request(session_id, "question_status"))
+                    .await
+            })
+        };
+
+        wait_for_pending_question_count(&engine, 1).await;
+
+        assert_eq!(
+            engine.status(session_id).await.unwrap(),
+            SessionRuntimeStatus::Blocked {
+                kind: crate::types::SessionBlockedKind::Question,
+                request_id: "question_status".into(),
+            }
+        );
+
+        let statuses = engine.list_statuses().await.unwrap();
+        assert_eq!(
+            statuses.get(&session_id),
+            Some(&SessionRuntimeStatus::Blocked {
+                kind: crate::types::SessionBlockedKind::Question,
+                request_id: "question_status".into(),
+            })
+        );
+
+        let answered = engine
+            .question_runtime
+            .reply(crate::types::QuestionReply {
+                session_id,
+                request_id: "question_status".into(),
+                answers: vec![vec!["a".into()]],
+            })
+            .await
+            .unwrap();
+        assert!(answered);
+
+        let result = waiter.await.unwrap().unwrap();
+        assert_eq!(result, vec![vec!["a".to_string()]]);
+        assert_eq!(
+            engine.status(session_id).await.unwrap(),
+            SessionRuntimeStatus::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_rejects_pending_question_waiters_for_session() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let engine = Arc::new(
+            build_engine(
+                Arc::clone(&storage),
+                Arc::new(StubProvider::done()),
+                Some("stub/test-model".into()),
+            )
+            .await,
+        );
+
+        let waiter = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .question_runtime
+                    .ask(question_request(session_id, "question_cancel"))
+                    .await
+            })
+        };
+
+        wait_for_pending_question_count(&engine, 1).await;
+        engine.cancel(session_id).await.unwrap();
+
+        let err = waiter.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("question request rejected"));
+        assert!(engine.question_runtime.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn detached_prompt_accepts_immediately_and_starts_background_run() {
         let (storage, _file) = make_storage().await;
         let project_id = ProjectId::new();
@@ -1568,22 +2166,40 @@ mod tests {
         let bus = Arc::new(BroadcastBus::default_capacity());
         let mut rx = bus.subscribe();
 
-        let engine = SessionEngine::new(
+        let engine = Arc::new(SessionEngine::new(
             Arc::clone(&storage),
             Arc::clone(&bus),
             registry,
             Some("anthropic/test-model".into()),
-        );
+        ));
 
+        let runner = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .prompt(SessionPrompt {
+                        session_id,
+                        text: "list files".into(),
+                        model: None,
+                        plan_mode: false,
+                    })
+                    .await
+            })
+        };
+
+        wait_for_pending_permission_count(&engine, 1).await;
+        let permission = engine.permission_runtime.list().await.unwrap();
         engine
-            .prompt(SessionPrompt {
+            .permission_runtime
+            .reply(PermissionReply {
                 session_id,
-                text: "list files".into(),
-                model: None,
-                plan_mode: false,
+                request_id: permission[0].id.clone(),
+                reply: PermissionReplyKind::Once,
             })
             .await
             .unwrap();
+
+        runner.await.unwrap().unwrap();
 
         let history = storage.list_history_with_parts(session_id).await.unwrap();
         assert!(
@@ -1648,6 +2264,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_loop_blocks_on_permission_runtime_and_resumes_after_reply() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let registry = Arc::new(ModelRegistry::new());
+        registry
+            .register("anthropic", Arc::new(ToolLoopProvider::new()))
+            .await;
+
+        let engine = Arc::new(SessionEngine::new(
+            Arc::clone(&storage),
+            Arc::new(BroadcastBus::default_capacity()),
+            registry,
+            Some("anthropic/test-model".into()),
+        ));
+
+        let runner = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .prompt(SessionPrompt {
+                        session_id,
+                        text: "list files".into(),
+                        model: None,
+                        plan_mode: false,
+                    })
+                    .await
+            })
+        };
+
+        wait_for_pending_permission_count(&engine, 1).await;
+        let pending = engine.permission_runtime.list().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].permission, "bash");
+        assert_eq!(
+            pending[0].tool.as_ref().map(|tool| tool.call_id.as_str()),
+            Some("call_1")
+        );
+
+        let approved = engine
+            .permission_runtime
+            .reply(PermissionReply {
+                session_id,
+                request_id: pending[0].id.clone(),
+                reply: PermissionReplyKind::Once,
+            })
+            .await
+            .unwrap();
+        assert!(approved);
+
+        runner.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn tool_loop_blocks_on_question_runtime_and_resumes_after_reply() {
+        let (storage, _file) = make_storage().await;
+        let project_id = ProjectId::new();
+        let session_id = SessionId::new();
+        storage
+            .upsert_project(project_row(project_id))
+            .await
+            .unwrap();
+        storage
+            .create_session(session_row(session_id, project_id))
+            .await
+            .unwrap();
+
+        let registry = Arc::new(ModelRegistry::new());
+        registry
+            .register("anthropic", Arc::new(ToolLoopQuestionProvider::new()))
+            .await;
+
+        let engine = Arc::new(SessionEngine::new(
+            Arc::clone(&storage),
+            Arc::new(BroadcastBus::default_capacity()),
+            registry,
+            Some("anthropic/test-model".into()),
+        ));
+
+        let runner = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .prompt(SessionPrompt {
+                        session_id,
+                        text: "question tool".into(),
+                        model: None,
+                        plan_mode: false,
+                    })
+                    .await
+            })
+        };
+
+        wait_for_pending_permission_count(&engine, 1).await;
+        let permission = engine.permission_runtime.list().await.unwrap();
+        assert_eq!(permission.len(), 1);
+        engine
+            .permission_runtime
+            .reply(PermissionReply {
+                session_id,
+                request_id: permission[0].id.clone(),
+                reply: PermissionReplyKind::Once,
+            })
+            .await
+            .unwrap();
+
+        wait_for_pending_question_count(&engine, 1).await;
+        let questions = engine.question_runtime.list().await.unwrap();
+        assert_eq!(questions.len(), 1);
+        assert_eq!(
+            questions[0].tool.as_ref().map(|tool| tool.call_id.as_str()),
+            Some("call_question_1")
+        );
+
+        let answered = engine
+            .question_runtime
+            .reply(crate::types::QuestionReply {
+                session_id,
+                request_id: questions[0].id.clone(),
+                answers: vec![vec!["dev".into()]],
+            })
+            .await
+            .unwrap();
+        assert!(answered);
+
+        runner.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn cancel_stops_in_flight_tool_capable_loop_and_releases_run_state() {
         let (storage, _file) = make_storage().await;
         let project_id = ProjectId::new();
@@ -1691,6 +2445,18 @@ mod tests {
                     .await
             })
         };
+
+        wait_for_pending_permission_count(&engine, 1).await;
+        let permission = engine.permission_runtime.list().await.unwrap();
+        engine
+            .permission_runtime
+            .reply(PermissionReply {
+                session_id,
+                request_id: permission[0].id.clone(),
+                reply: PermissionReplyKind::Once,
+            })
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             std::time::Duration::from_millis(300),
@@ -1747,22 +2513,40 @@ mod tests {
         registry
             .register("anthropic", Arc::new(ToolLoopFailureProvider::new()))
             .await;
-        let engine = SessionEngine::new(
+        let engine = Arc::new(SessionEngine::new(
             Arc::clone(&storage),
             Arc::clone(&bus),
             registry,
             Some("anthropic/test-model".into()),
-        );
+        ));
 
+        let runner = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .prompt(SessionPrompt {
+                        session_id,
+                        text: "trigger failure".into(),
+                        model: None,
+                        plan_mode: false,
+                    })
+                    .await
+            })
+        };
+
+        wait_for_pending_permission_count(&engine, 1).await;
+        let permission = engine.permission_runtime.list().await.unwrap();
         engine
-            .prompt(SessionPrompt {
+            .permission_runtime
+            .reply(PermissionReply {
                 session_id,
-                text: "trigger failure".into(),
-                model: None,
-                plan_mode: false,
+                request_id: permission[0].id.clone(),
+                reply: PermissionReplyKind::Once,
             })
             .await
             .unwrap();
+
+        runner.await.unwrap().unwrap();
 
         let history = storage.list_history_with_parts(session_id).await.unwrap();
         let failed_tool_result = history

@@ -7,7 +7,9 @@ use opencode_core::config::Config;
 use opencode_provider::{
     AccountService, ModelRegistry, ProviderAuthService, ProviderCatalogService,
 };
-use opencode_session::engine::Session;
+use opencode_session::{
+    engine::Session, permission_runtime::PermissionRuntime, question_runtime::QuestionRuntime,
+};
 use opencode_storage::Storage;
 use tokio::sync::Notify;
 
@@ -39,6 +41,10 @@ pub struct AppState {
     pub storage: Arc<dyn Storage>,
     /// Session engine.
     pub session: Arc<dyn Session>,
+    /// Permission runtime service shared with the session engine.
+    pub permission_runtime: Arc<dyn PermissionRuntime>,
+    /// Question runtime service shared with the session engine.
+    pub question_runtime: Arc<dyn QuestionRuntime>,
     /// LLM provider registry (may be empty when harness is disabled).
     pub registry: Arc<ModelRegistry>,
     /// Provider catalog service for public provider/config metadata.

@@ -674,6 +674,8 @@ mod tests {
         Success,
         Busy,
         NoActiveRun,
+        BlockedPermission,
+        BlockedQuestion,
     }
 
     struct StubSession {
@@ -707,6 +709,9 @@ mod tests {
                 StubSessionMode::NoActiveRun => {
                     Err(SessionError::NoActiveRun(req.session_id.to_string()))
                 }
+                StubSessionMode::BlockedPermission | StubSessionMode::BlockedQuestion => {
+                    Err(SessionError::Busy(req.session_id.to_string()))
+                }
             }
         }
 
@@ -719,6 +724,7 @@ mod tests {
                 }
                 StubSessionMode::NotFound => Err(SessionError::NotFound("stub".into())),
                 StubSessionMode::Busy => Err(SessionError::Busy(session_id.to_string())),
+                StubSessionMode::BlockedPermission | StubSessionMode::BlockedQuestion => Ok(()),
             }
         }
 
@@ -738,6 +744,9 @@ mod tests {
                 StubSessionMode::NoActiveRun => {
                     Err(SessionError::NoActiveRun(req.session_id.to_string()))
                 }
+                StubSessionMode::BlockedPermission | StubSessionMode::BlockedQuestion => {
+                    Err(SessionError::Busy(req.session_id.to_string()))
+                }
             }
         }
 
@@ -749,6 +758,14 @@ mod tests {
                 StubSessionMode::NotFound => Err(SessionError::NotFound(session_id.to_string())),
                 StubSessionMode::NoActiveRun => Ok(SessionRuntimeStatus::Idle),
                 StubSessionMode::Success | StubSessionMode::Busy => Ok(SessionRuntimeStatus::Busy),
+                StubSessionMode::BlockedPermission => Ok(SessionRuntimeStatus::Blocked {
+                    kind: opencode_session::types::SessionBlockedKind::Permission,
+                    request_id: "perm-route-test".into(),
+                }),
+                StubSessionMode::BlockedQuestion => Ok(SessionRuntimeStatus::Blocked {
+                    kind: opencode_session::types::SessionBlockedKind::Question,
+                    request_id: "question-route-test".into(),
+                }),
             }
         }
 
@@ -759,6 +776,22 @@ mod tests {
             let mut out = std::collections::HashMap::new();
             if matches!(self.mode, StubSessionMode::Success | StubSessionMode::Busy) {
                 out.insert(SessionId::new(), SessionRuntimeStatus::Busy);
+            } else if matches!(self.mode, StubSessionMode::BlockedPermission) {
+                out.insert(
+                    SessionId::new(),
+                    SessionRuntimeStatus::Blocked {
+                        kind: opencode_session::types::SessionBlockedKind::Permission,
+                        request_id: "perm-route-test".into(),
+                    },
+                );
+            } else if matches!(self.mode, StubSessionMode::BlockedQuestion) {
+                out.insert(
+                    SessionId::new(),
+                    SessionRuntimeStatus::Blocked {
+                        kind: opencode_session::types::SessionBlockedKind::Question,
+                        request_id: "question-route-test".into(),
+                    },
+                );
             }
             Ok(out)
         }
@@ -771,12 +804,22 @@ mod tests {
     fn app_with_session(stub: Stub, session: Arc<dyn Session>) -> Router {
         let storage: Arc<dyn Storage> = Arc::new(stub);
         let cfg = Config::default();
+        let bus = Arc::new(BroadcastBus::new(64));
         let state = crate::state::AppState {
             config: Arc::new(cfg.clone()),
-            bus: Arc::new(BroadcastBus::new(64)),
+            bus: Arc::clone(&bus),
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session,
+            permission_runtime: Arc::new(
+                opencode_session::permission_runtime::InMemoryPermissionRuntime::new(
+                    Arc::clone(&storage),
+                    Arc::clone(&bus),
+                ),
+            ),
+            question_runtime: Arc::new(
+                opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
+            ),
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
             provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
             provider_auth: Arc::new(ProviderAuthService::new()),
@@ -794,12 +837,22 @@ mod tests {
     fn app_arc_with_session(stub: Arc<Stub>, session: Arc<dyn Session>) -> Router {
         let storage: Arc<dyn Storage> = stub;
         let cfg = Config::default();
+        let bus = Arc::new(BroadcastBus::new(64));
         let state = crate::state::AppState {
             config: Arc::new(cfg.clone()),
-            bus: Arc::new(BroadcastBus::new(64)),
+            bus: Arc::clone(&bus),
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session,
+            permission_runtime: Arc::new(
+                opencode_session::permission_runtime::InMemoryPermissionRuntime::new(
+                    Arc::clone(&storage),
+                    Arc::clone(&bus),
+                ),
+            ),
+            question_runtime: Arc::new(
+                opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
+            ),
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
             provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
             provider_auth: Arc::new(ProviderAuthService::new()),
@@ -1594,5 +1647,58 @@ mod tests {
 
         let resp = app(Stub::default()).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn singular_runtime_status_route_returns_blocked_shape() {
+        let sid = SessionId::new();
+        let app = app_with_session(
+            Stub::default(),
+            Arc::new(StubSession::new(StubSessionMode::BlockedPermission)),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/session/{sid}/status"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["session_id"], sid.to_string());
+        assert_eq!(value["status"]["type"], "blocked");
+        assert_eq!(value["status"]["kind"], "permission");
+        assert_eq!(value["status"]["requestID"], "perm-route-test");
+    }
+
+    #[tokio::test]
+    async fn list_runtime_status_route_returns_blocked_question_shape() {
+        let app = app_with_session(
+            Stub::default(),
+            Arc::new(StubSession::new(StubSessionMode::BlockedQuestion)),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/session/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["status"]["type"], "blocked");
+        assert_eq!(rows[0]["status"]["kind"], "question");
+        assert_eq!(rows[0]["status"]["requestID"], "question-route-test");
     }
 }

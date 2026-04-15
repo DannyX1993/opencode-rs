@@ -1,4 +1,4 @@
-# Manual Testing Guide — Session Runtime + Provider Harness
+# Manual Testing Guide — Session Runtime, Permission/Question Runtime, and Provider Harness
 
 This guide explains how to manually test the current Rust runtime by starting the HTTP server and using `curl`.
 
@@ -40,7 +40,7 @@ OPENCODE_MANUAL_HARNESS=1 OPENAI_API_KEY=sk-... \
 
 ## Session runtime path (recommended for this change)
 
-Use this path to validate the `expand-tool-runtime-parity` work.
+Use this path to validate the current Rust runtime behavior including interactive permission/question gating.
 
 ### Supported providers for tool-capable turns
 
@@ -92,7 +92,7 @@ curl -X POST http://localhost:4141/api/v1/projects/$PID/sessions \
     "slug": "manual-runtime-test",
     "directory": "/home/dannyx/projects/Rust/opencode-rs",
     "title": "Manual runtime test",
-    "version": "0.9.0",
+    "version": "0.10.0",
     "share_url": null,
     "summary_additions": null,
     "summary_deletions": null,
@@ -135,6 +135,28 @@ curl -X POST http://localhost:4141/api/v1/sessions/$SID/prompt \
 
 The route returns `202 Accepted` when the run is queued successfully.
 
+### 3b) Inspect runtime status (includes blocked shape)
+
+```bash
+curl http://localhost:4141/api/v1/session/$SID/status
+```
+
+Expected `status` values:
+
+- `"idle"`
+- `"busy"`
+- blocked object:
+
+```json
+{
+  "type": "blocked",
+  "kind": "permission",
+  "requestID": "permission-..."
+}
+```
+
+(`kind` may also be `question`.)
+
 ### 4) Inspect persisted messages and tool replay artifacts
 
 ```bash
@@ -155,6 +177,68 @@ That confirms the provider -> tool -> provider loop was replayed from storage.
 ```bash
 curl -X POST http://localhost:4141/api/v1/sessions/$SID/cancel
 ```
+
+When a run is blocked on permission/question input, cancel also rejects pending requests for that session.
+
+## Permission/question runtime path
+
+Use these routes to inspect and resolve blocked runtime prompts.
+
+### List pending permission requests
+
+```bash
+curl http://localhost:4141/api/v1/permission
+```
+
+### Reply to a permission request
+
+```bash
+curl -X POST http://localhost:4141/api/v1/permission/reply \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionID": "'"$SID"'",
+    "requestID": "permission-<tool-call-id>",
+    "reply": "always"
+  }'
+```
+
+Response contract:
+
+```json
+{ "ok": true }
+```
+
+`ok: false` means the request id was not found (or did not match the session).
+
+### Durable allow-always check
+
+1. Reply with `"always"` for a permission request.
+2. Trigger the same tool pattern again.
+3. Confirm the matching ask no longer appears in `GET /api/v1/permission` (short-circuited by stored allow rule).
+
+### List/reply/reject question requests
+
+```bash
+curl http://localhost:4141/api/v1/question
+```
+
+```bash
+curl -X POST http://localhost:4141/api/v1/question/reply \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionID": "'"$SID"'",
+    "requestID": "question-<tool-call-id>",
+    "answers": [["first"], ["second", "third"]]
+  }'
+```
+
+```bash
+curl -X POST http://localhost:4141/api/v1/question/reject \
+  -H "Content-Type: application/json" \
+  -d '{"requestID":"question-<tool-call-id>"}'
+```
+
+For reply/reject routes, unknown ids return `202` with `{ "ok": false }`.
 
 ## Raw provider harness path
 
@@ -182,6 +266,16 @@ Expected manual flow:
 5. Optionally switch active account/org and remove account to verify cleanup behavior.
 
 ## Endpoints
+
+### `GET /api/v1/event`
+
+Streams translated runtime events as SSE. For this runtime slice, validate that these event types can appear when applicable:
+
+- `permission.asked`
+- `permission.replied`
+- `question.asked`
+- `question.replied`
+- `question.rejected`
 
 ### `POST /api/v1/provider/stream`
 
@@ -297,5 +391,6 @@ requires a real API key and makes live network requests to external providers.
 ## Important scope notes
 
 - `POST /api/v1/provider/stream` does **not** exercise session persistence or the runtime tool loop.
-- `POST /api/v1/sessions/:sid/prompt` is the correct path for validating the bounded Anthropic/Google runtime parity work.
-- The current workspace version remains `0.9.0`.
+- `POST /api/v1/sessions/:sid/prompt` is the correct path for validating bounded Anthropic/Google runtime behavior.
+- Permission/question route behavior is runtime-memory backed (pending asks) with durable allow-rule writes for `permission/reply: always`.
+- The current workspace version remains `0.10.0`.

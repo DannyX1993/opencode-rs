@@ -235,12 +235,22 @@ mod tests {
 
     fn app_with_storage(storage: Arc<dyn Storage>) -> Router {
         let cfg = Config::default();
+        let bus = Arc::new(BroadcastBus::new(64));
         let state = AppState {
             config: Arc::new(cfg.clone()),
-            bus: Arc::new(BroadcastBus::new(64)),
+            bus: Arc::clone(&bus),
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
             session: Arc::new(StubSession),
+            permission_runtime: Arc::new(
+                opencode_session::permission_runtime::InMemoryPermissionRuntime::new(
+                    Arc::clone(&storage),
+                    Arc::clone(&bus),
+                ),
+            ),
+            question_runtime: Arc::new(
+                opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
+            ),
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
             provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
             provider_auth: Arc::new(ProviderAuthService::new()),
