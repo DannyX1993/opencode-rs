@@ -511,7 +511,7 @@ mod tests {
         error::{SessionError, StorageError},
         id::{AccountId, MessageId, PartId, ProjectId, SessionId},
     };
-    use opencode_provider::{AccountService, ProviderAuthService, ProviderCatalogService};
+    use opencode_provider::{AccountService, ProviderAuthService};
     use opencode_session::{
         engine::Session,
         types::{DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus},
@@ -806,7 +806,13 @@ mod tests {
         let cfg = Config::default();
         let bus = Arc::new(BroadcastBus::new(64));
         let state = crate::state::AppState {
-            config: Arc::new(cfg.clone()),
+            config_service: Arc::new(
+                opencode_core::config_service::ConfigService::with_cached_resolved(
+                    std::env::temp_dir(),
+                    None,
+                    cfg.clone(),
+                ),
+            ),
             bus: Arc::clone(&bus),
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
@@ -821,7 +827,7 @@ mod tests {
                 opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
             ),
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
-            provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
+            provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,
@@ -839,7 +845,13 @@ mod tests {
         let cfg = Config::default();
         let bus = Arc::new(BroadcastBus::new(64));
         let state = crate::state::AppState {
-            config: Arc::new(cfg.clone()),
+            config_service: Arc::new(
+                opencode_core::config_service::ConfigService::with_cached_resolved(
+                    std::env::temp_dir(),
+                    None,
+                    cfg,
+                ),
+            ),
             bus: Arc::clone(&bus),
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
@@ -854,7 +866,7 @@ mod tests {
                 opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
             ),
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
-            provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
+            provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,

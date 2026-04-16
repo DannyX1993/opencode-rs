@@ -20,13 +20,15 @@ Active. This crate provides foundational code used across the current binary, se
 
 ## Configuration Behavior
 
-`Config::load(project_dir)` merges:
+`opencode-core` now exposes both low-level config loading and a shared runtime `ConfigService`:
 
-1. `~/.config/opencode/config.jsonc`
-2. `<project_dir>/.opencode/config.jsonc`
-3. environment variables
+- `Config::load(project_dir)` performs one-shot layered merge (`defaults < global < local < env`).
+- `ConfigService::resolve()` does the same merge with an in-memory cache for runtime reuse.
+- `ConfigService::read_scope(scope)` returns persisted raw config for `local` or `global` scope.
+- `ConfigService::update_scope(scope, payload)` merges and persists only the targeted scope, then invalidates cached resolved config on success.
+- `ConfigService::resolve_bind(cli_overrides)` applies CLI host/port overrides on top of resolved config without affecting non-bind fields.
 
-Environment support includes keys such as `OPENCODE_MODEL`, `OPENCODE_LOG_LEVEL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, and `OPENCODE_SERVER_PORT`.
+Environment support includes keys such as `OPENCODE_MODEL`, `OPENCODE_LOG_LEVEL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `OPENCODE_SERVER_HOST`, `OPENCODE_SERVER_PORT`, and `OPENCODE_AUTH_TOKEN`.
 
 ## Why Other Crates Depend On It
 

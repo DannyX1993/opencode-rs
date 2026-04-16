@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod config_service;
 pub mod context;
 pub mod dto;
 pub mod error;
@@ -23,6 +24,7 @@ pub mod tracing;
 pub mod prelude {
     pub use crate::{
         config::Config,
+        config_service::{ConfigScope, ConfigService, ServerBindOverrides},
         context::SessionCtx,
         dto::*,
         error::{ConfigError, OpenCodeError, SessionError, StorageError},

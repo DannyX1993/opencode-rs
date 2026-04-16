@@ -10,4 +10,4 @@ Binary implementation modules for the `opencode` executable.
 ## Current notes
 
 - `lib.rs` wires `SessionEngine`, provider services, storage, the event bus, and the default SSE heartbeat driver into `opencode-server::AppState`.
-- The `version` command reflects the workspace release version (`0.10.0` in this batch).
+- The `version` command reflects the workspace release version (`0.11.0` in this batch).

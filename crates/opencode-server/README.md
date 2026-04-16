@@ -40,6 +40,10 @@ Active. The crate has real routes, router tests, and is used by `cargo run -p op
 | `GET` | `/api/v1/provider/account` | returns persisted accounts + active account/org state |
 | `POST` | `/api/v1/provider/account/use` | sets active account and optional active org |
 | `DELETE` | `/api/v1/provider/account/{account_id}` | removes persisted account and clears invalid active state |
+| `GET` | `/api/v1/config` | returns persisted local config payload (`scope: "local"`) |
+| `PATCH` | `/api/v1/config` | merges/persists local config and invalidates resolved runtime cache |
+| `GET` | `/api/v1/global/config` | returns persisted global config payload (`scope: "global"`) |
+| `PATCH` | `/api/v1/global/config` | merges/persists global config and invalidates resolved runtime cache |
 | `GET` | `/api/v1/config/providers` | returns connected provider subset + defaults |
 | `POST` | `/api/v1/provider/stream` | manual SSE harness, only when enabled |
 
@@ -52,6 +56,8 @@ Active. The crate has real routes, router tests, and is used by `cargo run -p op
 - Detached background prompt failures can be surfaced as `session.error`; successful detached calls return acceptance metadata immediately.
 - `cancel` can also resolve blocked runs by rejecting pending permission/question requests for the target session.
 - Permission `always` writes durable allow rules, and future matching asks can skip pending state.
+- Config routes return scoped persisted payloads (local/global), not the fully merged resolved runtime view.
+- Provider listing/config routes derive visibility/connectivity from latest resolved config via shared `ConfigService` state.
 - `/api/v1/provider/stream` is a raw provider harness; it does not create sessions, persist history, or exercise the session replay loop by itself.
 - OpenAI remains available through the provider layer and harness, but not as a tool-capable session-runtime provider in this MVP.
 - OAuth pending authorization state is in-process (not durable across server restarts).

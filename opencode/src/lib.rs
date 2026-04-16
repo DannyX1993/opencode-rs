@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use opencode_cli::cli::{Cli, Command};
-use opencode_core::config::Config;
+use opencode_core::config_service::{ConfigService, ServerBindOverrides};
 use std::path::Path;
 
 /// Dispatch the parsed CLI command, given the already-bootstrapped config.
@@ -24,14 +24,14 @@ pub async fn dispatch(cli: Cli, cwd: &Path) -> Result<()> {
         Command::Run => {
             tracing::info!("TUI mode — not yet implemented");
         }
-        Command::Server { port } => {
-            start_server(cwd, port).await?;
+        Command::Server { host, port } => {
+            start_server(cwd, ServerBindOverrides { host, port }).await?;
         }
         Command::Prompt { text, .. } => {
             tracing::info!(%text, "one-shot prompt — not yet implemented");
         }
         Command::Config { show: true } => {
-            let cfg = Config::load(cwd).await?;
+            let cfg = ConfigService::new(cwd.to_path_buf()).resolve().await?;
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
         Command::Config { show: false } => {
@@ -52,7 +52,7 @@ pub async fn dispatch(cli: Cli, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Start the HTTP server on `port`, building minimal app state from `cwd`.
+/// Start the HTTP server using resolved bind settings for `cwd`.
 ///
 /// Reads `OPENCODE_MANUAL_HARNESS=1` from the environment to enable
 /// the manual provider harness route.
@@ -60,11 +60,11 @@ pub async fn dispatch(cli: Cli, cwd: &Path) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if storage init, TCP bind, or serve fails.
-pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
+pub async fn start_server(cwd: &Path, cli_bind: ServerBindOverrides) -> Result<()> {
     use opencode_bus::BroadcastBus;
     use opencode_provider::{
         AccountService, AnthropicProvider, CatalogCache, EnvAuthResolver, GoogleProvider,
-        ModelRegistry, OpenAiProvider, ProviderAuthService, ProviderCatalogService,
+        ModelRegistry, OpenAiProvider, ProviderAuthService,
     };
     use opencode_server::{AppState, build, serve};
     use opencode_session::{
@@ -75,7 +75,11 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    let cfg = Config::load(cwd).await?;
+    // Shared runtime config service used by startup and request handlers.
+    // We resolve once here for startup-only concerns, and keep the service in
+    // AppState so routes can always read latest resolved/scoped config.
+    let config_service = Arc::new(ConfigService::new(cwd.to_path_buf()));
+    let cfg = config_service.resolve().await?;
     let db = cwd.join("opencode.db");
     let pool = connect(&db).await?;
     let storage: Arc<dyn opencode_storage::Storage> = Arc::new(StorageImpl::new(pool));
@@ -123,12 +127,12 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
         .ok()
         .flatten()
         .unwrap_or_default();
-    let provider_catalog = Arc::new(ProviderCatalogService::new_with_models(cfg.clone(), models));
+    let provider_catalog_models = Arc::new(models);
     let provider_auth = Arc::new(ProviderAuthService::new());
     let provider_accounts = Arc::new(AccountService::new(Arc::clone(&storage)));
 
     let state = AppState {
-        config: Arc::new(cfg),
+        config_service: Arc::clone(&config_service),
         bus,
         event_heartbeat: opencode_server::state::EventHeartbeat::default(),
         storage,
@@ -136,13 +140,15 @@ pub async fn start_server(cwd: &Path, port: u16) -> Result<()> {
         permission_runtime,
         question_runtime,
         registry,
-        provider_catalog,
+        provider_catalog_models,
         provider_auth,
         provider_accounts,
         harness,
     };
 
-    let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    // Bind policy: CLI host/port overrides > resolved config > defaults.
+    let (host, port) = config_service.resolve_bind(cli_bind).await?;
+    let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let router = build(state);
     tracing::info!(%addr, "opencode server listening");
     serve(router, addr).await?;
@@ -199,7 +205,7 @@ mod tests {
 
     #[test]
     fn package_version_matches_next_minor_release() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.10.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.11.0");
     }
 
     // RED S.1 — `server` subcommand binds a real TCP socket and serves health
@@ -215,7 +221,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            start_server(&path, port).await.unwrap();
+            start_server(
+                &path,
+                opencode_core::config_service::ServerBindOverrides {
+                    host: Some("127.0.0.1".to_string()),
+                    port: Some(port),
+                },
+            )
+            .await
+            .unwrap();
         });
 
         // Give the server time to bind.
@@ -226,6 +240,99 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["status"], "ok");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_server_uses_resolved_bind_when_cli_overrides_missing() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".opencode")).unwrap();
+        std::fs::write(
+            dir.path().join(".opencode/config.jsonc"),
+            format!(r#"{{ "server": {{ "host": "127.0.0.1", "port": {port} }} }}"#),
+        )
+        .unwrap();
+
+        let path = dir.path().to_path_buf();
+        let handle = tokio::spawn(async move {
+            start_server(
+                &path,
+                opencode_core::config_service::ServerBindOverrides {
+                    host: None,
+                    port: None,
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("http://127.0.0.1:{port}/health");
+        let resp = reqwest::get(&url).await.expect("health request failed");
+        assert_eq!(resp.status().as_u16(), 200);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_server_cli_bind_overrides_win_while_config_drives_provider_view() {
+        use std::net::TcpListener;
+
+        let config_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config_port = config_listener.local_addr().unwrap().port();
+        drop(config_listener);
+
+        let cli_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let cli_port = cli_listener.local_addr().unwrap().port();
+        drop(cli_listener);
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".opencode")).unwrap();
+        std::fs::write(
+            dir.path().join(".opencode/config.jsonc"),
+            format!(
+                r#"{{
+                    "server": {{ "host": "127.0.0.1", "port": {config_port} }},
+                    "providers": {{ "openai": "sk-openai" }}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let path = dir.path().to_path_buf();
+        let handle = tokio::spawn(async move {
+            start_server(
+                &path,
+                opencode_core::config_service::ServerBindOverrides {
+                    host: Some("127.0.0.1".to_string()),
+                    port: Some(cli_port),
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let health_resp = reqwest::get(format!("http://127.0.0.1:{cli_port}/health"))
+            .await
+            .expect("health request failed");
+        assert_eq!(health_resp.status().as_u16(), 200);
+
+        let provider_resp = reqwest::get(format!("http://127.0.0.1:{cli_port}/api/v1/provider"))
+            .await
+            .expect("provider request failed");
+        assert_eq!(provider_resp.status().as_u16(), 200);
+        let provider_json: serde_json::Value = provider_resp.json().await.unwrap();
+        assert_eq!(provider_json["connected"], serde_json::json!(["openai"]));
 
         handle.abort();
     }
@@ -249,7 +356,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            start_server(&path, port).await.unwrap();
+            start_server(
+                &path,
+                opencode_core::config_service::ServerBindOverrides {
+                    host: Some("127.0.0.1".to_string()),
+                    port: Some(port),
+                },
+            )
+            .await
+            .unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -291,7 +406,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            start_server(&path, port).await.unwrap();
+            start_server(
+                &path,
+                opencode_core::config_service::ServerBindOverrides {
+                    host: Some("127.0.0.1".to_string()),
+                    port: Some(port),
+                },
+            )
+            .await
+            .unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -353,7 +476,15 @@ mod tests {
         .unwrap();
         let path = dir.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            start_server(&path, port).await.unwrap();
+            start_server(
+                &path,
+                opencode_core::config_service::ServerBindOverrides {
+                    host: Some("127.0.0.1".to_string()),
+                    port: Some(port),
+                },
+            )
+            .await
+            .unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -396,7 +527,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            start_server(&path, port).await.unwrap();
+            start_server(
+                &path,
+                opencode_core::config_service::ServerBindOverrides {
+                    host: Some("127.0.0.1".to_string()),
+                    port: Some(port),
+                },
+            )
+            .await
+            .unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

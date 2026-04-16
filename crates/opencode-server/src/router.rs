@@ -65,6 +65,11 @@ pub fn build(state: AppState) -> Router {
         .route("/question", get(question::list))
         .route("/question/reply", post(question::reply))
         .route("/question/reject", post(question::reject))
+        .route("/config", get(config::get_local).patch(config::patch_local))
+        .route(
+            "/global/config",
+            get(config::get_global).patch(config::patch_global),
+        )
         .route("/config/providers", get(config::providers))
         .route("/event", get(event::stream))
         // Manual provider harness (Phase 2 — env-gated)
@@ -109,6 +114,7 @@ mod tests {
     use futures::StreamExt;
     use opencode_bus::{BroadcastBus, BusEvent, EventBus};
     use opencode_core::config::Config;
+    use opencode_core::config_service::ConfigService;
     use opencode_core::{
         dto::{
             AccountRow, AccountStateRow, ControlAccountRow, MessageRow, MessageWithParts, PartRow,
@@ -117,14 +123,13 @@ mod tests {
         error::{SessionError, StorageError},
         id::{AccountId, ProjectId, SessionId},
     };
-    use opencode_provider::{
-        AccountService, ModelRegistry, ProviderAuthService, ProviderCatalogService,
-    };
+    use opencode_provider::{AccountService, ModelRegistry, ProviderAuthService};
     use opencode_session::engine::Session;
     use opencode_session::types::{
         DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus,
     };
     use opencode_storage::Storage;
+    use std::io::Write;
     use std::sync::Arc;
     use tokio::sync::Notify;
     use tower::ServiceExt;
@@ -264,11 +269,18 @@ mod tests {
     }
 
     fn state() -> AppState {
+        state_with_config_service(ConfigService::with_cached_resolved(
+            std::env::temp_dir(),
+            None,
+            Config::default(),
+        ))
+    }
+
+    fn state_with_config_service(config_service: ConfigService) -> AppState {
         let storage: Arc<dyn Storage> = Arc::new(StubStorage);
-        let cfg = Config::default();
         let bus = Arc::new(BroadcastBus::new(64));
         AppState {
-            config: Arc::new(cfg.clone()),
+            config_service: Arc::new(config_service),
             bus: Arc::clone(&bus),
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
@@ -283,11 +295,29 @@ mod tests {
                 opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
             ),
             registry: Arc::new(ModelRegistry::new()),
-            provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
+            provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,
         }
+    }
+
+    fn write_jsonc(path: &std::path::Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut file = std::fs::File::create(path).unwrap();
+        write!(file, "{content}").unwrap();
+    }
+
+    fn temp_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("opencode-server-{label}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     async fn read_sse_frame(
@@ -331,6 +361,380 @@ mod tests {
         let req = Request::builder().uri("/nope").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn local_config_route_returns_scoped_persisted_payload() {
+        let temp = temp_test_dir("local-config-route");
+        let project_dir = temp.join("project");
+        let global_path = temp.join("home/.config/opencode/config.jsonc");
+        write_jsonc(
+            &project_dir.join(".opencode/config.jsonc"),
+            r#"{ "model": "openai/gpt-5", "server": { "port": 7001 } }"#,
+        );
+
+        let service = ConfigService::with_global_config_path(project_dir, Some(global_path));
+        let app = build(state_with_config_service(service));
+        let req = Request::builder()
+            .uri("/api/v1/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["scope"], "local");
+        assert_eq!(value["config"]["model"], "openai/gpt-5");
+        assert_eq!(value["config"]["server"]["port"], 7001);
+    }
+
+    #[tokio::test]
+    async fn global_config_route_returns_scope_with_default_payload_when_missing() {
+        let temp = temp_test_dir("global-config-route");
+        let project_dir = temp.join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let global_path = temp.join("home/.config/opencode/config.jsonc");
+
+        let service = ConfigService::with_global_config_path(project_dir, Some(global_path));
+        let app = build(state_with_config_service(service));
+        let req = Request::builder()
+            .uri("/api/v1/global/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["scope"], "global");
+        assert_eq!(value["config"]["server"]["port"], 4141);
+        assert_eq!(value["config"]["server"]["host"], "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn local_config_route_returns_scope_with_default_payload_when_missing() {
+        let temp = temp_test_dir("local-config-default-route");
+        let project_dir = temp.join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let service = ConfigService::with_global_config_path(project_dir, None);
+        let app = build(state_with_config_service(service));
+        let req = Request::builder()
+            .uri("/api/v1/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["scope"], "local");
+        assert_eq!(value["config"]["server"]["port"], 4141);
+        assert_eq!(value["config"]["server"]["host"], "127.0.0.1");
+        assert!(value["config"]["model"].is_null());
+    }
+
+    #[tokio::test]
+    async fn global_config_route_returns_scoped_persisted_payload() {
+        let temp = temp_test_dir("global-config-persisted-route");
+        let project_dir = temp.join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let global_path = temp.join("home/.config/opencode/config.jsonc");
+        write_jsonc(
+            &global_path,
+            r#"{ "model": "anthropic/claude-3-7-sonnet", "server": { "host": "0.0.0.0", "port": 8181 } }"#,
+        );
+
+        let service = ConfigService::with_global_config_path(project_dir, Some(global_path));
+        let app = build(state_with_config_service(service));
+        let req = Request::builder()
+            .uri("/api/v1/global/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["scope"], "global");
+        assert_eq!(value["config"]["model"], "anthropic/claude-3-7-sonnet");
+        assert_eq!(value["config"]["server"]["host"], "0.0.0.0");
+        assert_eq!(value["config"]["server"]["port"], 8181);
+    }
+
+    #[tokio::test]
+    async fn local_config_patch_refreshes_provider_listing() {
+        let temp = temp_test_dir("local-config-patch-refresh");
+        let project_dir = temp.join("project");
+        let global_path = temp.join("home/.config/opencode/config.jsonc");
+
+        let mut cached = Config::default();
+        cached.providers.openai = Some("sk-openai".into());
+        let service = ConfigService::with_cached_resolved(project_dir, Some(global_path), cached);
+        let app = build(state_with_config_service(service));
+
+        let before = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/provider")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before.status(), StatusCode::OK);
+        let before_body = axum::body::to_bytes(before.into_body(), 8192)
+            .await
+            .unwrap();
+        let before_json: serde_json::Value = serde_json::from_slice(&before_body).unwrap();
+        assert_eq!(before_json["connected"], serde_json::json!(["openai"]));
+
+        let patch = Request::builder()
+            .method("PATCH")
+            .uri("/api/v1/config")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "providers": { "anthropic": "sk-ant" }
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let patch_resp = app.clone().oneshot(patch).await.unwrap();
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let patch_body = axum::body::to_bytes(patch_resp.into_body(), 8192)
+            .await
+            .unwrap();
+        let patch_json: serde_json::Value = serde_json::from_slice(&patch_body).unwrap();
+        assert_eq!(patch_json["scope"], "local");
+        assert_eq!(patch_json["config"]["providers"]["anthropic"], "sk-ant");
+
+        let after = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/provider")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::OK);
+        let after_body = axum::body::to_bytes(after.into_body(), 8192).await.unwrap();
+        let after_json: serde_json::Value = serde_json::from_slice(&after_body).unwrap();
+        assert_eq!(after_json["connected"], serde_json::json!(["anthropic"]));
+    }
+
+    #[tokio::test]
+    async fn global_config_patch_persists_and_reads_back_scoped_payload() {
+        let temp = temp_test_dir("global-config-patch");
+        let project_dir = temp.join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let global_path = temp.join("home/.config/opencode/config.jsonc");
+
+        let service = ConfigService::with_global_config_path(project_dir, Some(global_path));
+        let app = build(state_with_config_service(service));
+
+        let patch = Request::builder()
+            .method("PATCH")
+            .uri("/api/v1/global/config")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "server": { "host": "0.0.0.0", "port": 7331 }
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let patch_resp = app.clone().oneshot(patch).await.unwrap();
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let patch_body = axum::body::to_bytes(patch_resp.into_body(), 8192)
+            .await
+            .unwrap();
+        let patch_json: serde_json::Value = serde_json::from_slice(&patch_body).unwrap();
+        assert_eq!(patch_json["scope"], "global");
+        assert_eq!(patch_json["config"]["server"]["host"], "0.0.0.0");
+        assert_eq!(patch_json["config"]["server"]["port"], 7331);
+
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/global/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = axum::body::to_bytes(get_resp.into_body(), 8192)
+            .await
+            .unwrap();
+        let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+        assert_eq!(get_json["scope"], "global");
+        assert_eq!(get_json["config"]["server"]["host"], "0.0.0.0");
+        assert_eq!(get_json["config"]["server"]["port"], 7331);
+    }
+
+    #[tokio::test]
+    async fn global_config_patch_refreshes_provider_listing() {
+        let temp = temp_test_dir("global-config-patch-refresh");
+        let project_dir = temp.join("project");
+        let global_path = temp.join("home/.config/opencode/config.jsonc");
+
+        let mut cached = Config::default();
+        cached.providers.openai = Some("sk-openai".into());
+        let service = ConfigService::with_cached_resolved(project_dir, Some(global_path), cached);
+        let app = build(state_with_config_service(service));
+
+        let before = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/provider")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before.status(), StatusCode::OK);
+        let before_body = axum::body::to_bytes(before.into_body(), 8192)
+            .await
+            .unwrap();
+        let before_json: serde_json::Value = serde_json::from_slice(&before_body).unwrap();
+        assert_eq!(before_json["connected"], serde_json::json!(["openai"]));
+
+        let patch = Request::builder()
+            .method("PATCH")
+            .uri("/api/v1/global/config")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "providers": { "anthropic": "sk-ant" }
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let patch_resp = app.clone().oneshot(patch).await.unwrap();
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+
+        let after = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/provider")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::OK);
+        let after_body = axum::body::to_bytes(after.into_body(), 8192).await.unwrap();
+        let after_json: serde_json::Value = serde_json::from_slice(&after_body).unwrap();
+        assert_eq!(after_json["connected"], serde_json::json!(["anthropic"]));
+    }
+
+    #[tokio::test]
+    async fn invalid_local_config_patch_returns_client_error_and_keeps_cached_provider_view() {
+        let temp = temp_test_dir("invalid-local-config-patch");
+        let project_dir = temp.join("project");
+        let global_path = temp.join("home/.config/opencode/config.jsonc");
+
+        let mut cached = Config::default();
+        cached.providers.openai = Some("sk-openai".into());
+        let service = ConfigService::with_cached_resolved(project_dir, Some(global_path), cached);
+        let app = build(state_with_config_service(service));
+
+        let before = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/provider")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before.status(), StatusCode::OK);
+        let before_body = axum::body::to_bytes(before.into_body(), 8192)
+            .await
+            .unwrap();
+        let before_json: serde_json::Value = serde_json::from_slice(&before_body).unwrap();
+        assert_eq!(before_json["connected"], serde_json::json!(["openai"]));
+
+        let invalid_patch = Request::builder()
+            .method("PATCH")
+            .uri("/api/v1/config")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "server": { "port": "not-a-port" }
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let invalid_resp = app.clone().oneshot(invalid_patch).await.unwrap();
+        assert!(invalid_resp.status().is_client_error());
+
+        let after = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/provider")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::OK);
+        let after_body = axum::body::to_bytes(after.into_body(), 8192).await.unwrap();
+        let after_json: serde_json::Value = serde_json::from_slice(&after_body).unwrap();
+        assert_eq!(after_json["connected"], serde_json::json!(["openai"]));
+    }
+
+    #[tokio::test]
+    async fn invalid_global_config_patch_returns_client_error_and_keeps_persisted_payload() {
+        let temp = temp_test_dir("invalid-global-config-patch");
+        let project_dir = temp.join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let global_path = temp.join("home/.config/opencode/config.jsonc");
+        write_jsonc(
+            &global_path,
+            r#"{ "server": { "host": "127.0.0.1", "port": 9444 } }"#,
+        );
+
+        let service = ConfigService::with_global_config_path(project_dir, Some(global_path));
+        let app = build(state_with_config_service(service));
+
+        let invalid_patch = Request::builder()
+            .method("PATCH")
+            .uri("/api/v1/global/config")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "server": { "port": "not-a-port" }
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let invalid_resp = app.clone().oneshot(invalid_patch).await.unwrap();
+        assert!(invalid_resp.status().is_client_error());
+
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/global/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get_resp.into_body(), 8192)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["scope"], "global");
+        assert_eq!(json["config"]["server"]["host"], "127.0.0.1");
+        assert_eq!(json["config"]["server"]["port"], 9444);
     }
 
     #[tokio::test]

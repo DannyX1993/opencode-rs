@@ -19,7 +19,7 @@ Active. This crate is used by the current binary and has real tests around comma
 | Command | Implemented in runtime? | Notes |
 | --- | --- | --- |
 | `run` | no | default command, still stubbed in `opencode` |
-| `server [--port N]` | yes | starts HTTP server |
+| `server [--host H] [--port N]` | yes | starts HTTP server; bind precedence is `CLI > resolved config > defaults` |
 | `prompt <text>` | no | parsed here, still stubbed in runtime |
 | `version` | yes | printed by `opencode` |
 | `config [--show]` | partial | `--show` works; edit mode is stubbed |
@@ -43,6 +43,13 @@ Examples:
 opencode tool read --args-json '{"filePath":"README.md","limit":5}'
 opencode tool bash --args-json '{"command":"pwd","description":"print cwd"}' --output json
 ```
+
+## Config/bootstrap behavior
+
+- Bootstrap and server startup now use `opencode_core::config_service::ConfigService`.
+- Resolved config follows layered precedence: `defaults < global config < local config < env overrides`.
+- Server bind flags are optional and only override host/port.
+- `bootstrap_with_service` keeps command parsing and runtime wiring testable.
 
 ## Test
 

@@ -34,7 +34,7 @@ Current notable `partial` crate details:
 - `opencode-session` now includes bounded Anthropic/Google tool-loop execution, detached prompt acceptance, permission/question ask-reply runtimes, and blocked runtime status snapshots.
 - `opencode-bus` now includes `SessionError` plus permission/question ask/reply/reject events used by the SSE surface.
 
-Current notable `active` crate updates in `v0.10.0`:
+Current notable `active` crate updates in `v0.11.0`:
 
 - `opencode-provider` now owns provider metadata catalog filtering, auth-method discovery, and account-domain composition.
 - `opencode-server` now exposes public provider/account/config contracts (`/api/v1/provider*`, `/api/v1/config/providers`) alongside the manual stream harness.

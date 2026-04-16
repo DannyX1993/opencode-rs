@@ -137,7 +137,12 @@ pub async fn stream(State(state): State<AppState>, Json(body): Json<StreamBody>)
 
 /// `GET /api/v1/provider` — list visible providers with defaults/connectivity.
 pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
-    match state.provider_catalog.list() {
+    let catalog = match state.provider_catalog_view().await {
+        Ok(catalog) => catalog,
+        Err(err) => return HttpError::internal(err.to_string()).into_response(),
+    };
+
+    match catalog.list() {
         Ok(body) => (StatusCode::OK, Json(body)).into_response(),
         Err(err) => map_provider_error(err).into_response(),
     }
@@ -278,9 +283,7 @@ mod tests {
         error::{SessionError, StorageError},
         id::{AccountId, ProjectId, SessionId},
     };
-    use opencode_provider::{
-        AccountService, ModelRegistry, ProviderAuthService, ProviderCatalogService,
-    };
+    use opencode_provider::{AccountService, ModelRegistry, ProviderAuthService};
     use opencode_session::{
         engine::Session,
         types::{DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus},
@@ -461,7 +464,13 @@ mod tests {
         cfg.providers.openai = Some("sk-openai".into());
         let bus = Arc::new(BroadcastBus::new(64));
         let state = AppState {
-            config: Arc::new(cfg.clone()),
+            config_service: Arc::new(
+                opencode_core::config_service::ConfigService::with_cached_resolved(
+                    std::env::temp_dir(),
+                    None,
+                    cfg,
+                ),
+            ),
             bus: Arc::clone(&bus),
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
@@ -476,7 +485,7 @@ mod tests {
                 opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
             ),
             registry: Arc::new(ModelRegistry::new()),
-            provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
+            provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,

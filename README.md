@@ -9,7 +9,7 @@ Rust workspace for the `opencode` runtime, server surface, and core libraries.
 
 The workspace is **partially production-shaped**: core crates are functional (CLI, storage, provider adapters, HTTP routes, provider/account domain services, and session runtime core), while some user-facing surfaces remain intentionally stubbed.
 
-Current milestone reflected in this repo state: **`port-permission-and-question-runtime` (implemented + docs updated)**.
+Current milestone reflected in this repo state: **`port-config-and-global-state` (implemented + release-prep docs updated)**.
 
 ## Workspace Architecture (high level)
 
@@ -55,6 +55,19 @@ The `port-permission-and-question-runtime` slice is now landed in code, docs, an
 - Runtime status now supports blocked shapes: `{ "type": "blocked", "kind": "permission|question", "requestID": "..." }`.
 - Public SSE route `GET /api/v1/event` now translates `permission.asked`, `permission.replied`, `question.asked`, `question.replied`, and `question.rejected` in addition to existing lifecycle/tool events.
 - Durable allow-always semantics are implemented by merging normalized `allow` rules into project permission storage.
+
+## Config/global-state parity completed in this change stream
+
+The `port-config-and-global-state` slice is now landed in code, docs, and tests:
+
+- `opencode-core` now exposes a shared `ConfigService` that resolves layered runtime config once (`defaults < global < local < env`) and caches results.
+- Runtime bind precedence is now explicit and consistent: **CLI bind overrides > resolved config > defaults** (host/port only).
+- `opencode-server::AppState` now stores `Arc<ConfigService>` rather than a startup config snapshot, so handlers can fetch fresh resolved config on demand.
+- New scoped config APIs are available:
+  - `GET /api/v1/config` + `PATCH /api/v1/config` for local/project config
+  - `GET /api/v1/global/config` + `PATCH /api/v1/global/config` for global/user config
+- Successful scoped writes invalidate the resolved cache; failed writes keep the previous cached resolved state.
+- Provider listing/config views are now derived from the latest resolved config per request.
 
 ## Provider/auth/account parity retained from the prior stream
 
@@ -108,6 +121,10 @@ Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
 - `GET /api/v1/provider/account`
 - `POST /api/v1/provider/account/use`
 - `DELETE /api/v1/provider/account/:account_id`
+- `GET /api/v1/config`
+- `PATCH /api/v1/config`
+- `GET /api/v1/global/config`
+- `PATCH /api/v1/global/config`
 - `GET /api/v1/config/providers`
 - `POST /api/v1/provider/stream` (manual harness only)
 
@@ -145,9 +162,9 @@ Manual endpoint guide: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md)
 
 ## Versioning
 
-- Workspace version is currently `0.10.0` (`[workspace.package]`).
+- Workspace version is currently `0.11.0` (`[workspace.package]`).
 - Crates use `version.workspace = true`, so crate versions are kept in lockstep.
-- Git tag style remains `v<semver>` (this release target: `v0.10.0`).
+- Git tag style remains `v<semver>` (this release target: `v0.11.0`).
 - Until `1.0`, API and behavior may change between minor releases.
 
 ## More documentation

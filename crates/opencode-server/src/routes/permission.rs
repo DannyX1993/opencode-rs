@@ -47,7 +47,7 @@ mod tests {
         error::SessionError,
         id::{MessageId, ProjectId, SessionId},
     };
-    use opencode_provider::{AccountService, ProviderAuthService, ProviderCatalogService};
+    use opencode_provider::{AccountService, ProviderAuthService};
     use opencode_session::{
         engine::Session,
         permission_runtime::{InMemoryPermissionRuntime, PermissionRuntime},
@@ -204,7 +204,13 @@ mod tests {
 
         let cfg = Config::default();
         let state = AppState {
-            config: Arc::new(cfg.clone()),
+            config_service: Arc::new(
+                opencode_core::config_service::ConfigService::with_cached_resolved(
+                    std::env::temp_dir(),
+                    None,
+                    cfg,
+                ),
+            ),
             bus,
             event_heartbeat: crate::state::EventHeartbeat::default(),
             storage: Arc::clone(&storage),
@@ -212,7 +218,7 @@ mod tests {
             permission_runtime: Arc::clone(&permission_runtime),
             question_runtime,
             registry: Arc::new(opencode_provider::ModelRegistry::new()),
-            provider_catalog: Arc::new(ProviderCatalogService::new(cfg)),
+            provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
             harness: false,

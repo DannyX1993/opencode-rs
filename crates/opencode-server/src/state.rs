@@ -3,9 +3,9 @@
 use std::{sync::Arc, time::Duration};
 
 use opencode_bus::BroadcastBus;
-use opencode_core::config::Config;
+use opencode_core::{config::Config, config_service::ConfigService, error::ConfigError};
 use opencode_provider::{
-    AccountService, ModelRegistry, ProviderAuthService, ProviderCatalogService,
+    AccountService, ModelRegistry, ProviderAuthService, ProviderCatalogService, types::ModelInfo,
 };
 use opencode_session::{
     engine::Session, permission_runtime::PermissionRuntime, question_runtime::QuestionRuntime,
@@ -31,8 +31,8 @@ impl Default for EventHeartbeat {
 /// Shared state cloned into every Axum request handler.
 #[derive(Clone)]
 pub struct AppState {
-    /// Loaded configuration.
-    pub config: Arc<Config>,
+    /// Shared runtime config service.
+    pub config_service: Arc<ConfigService>,
     /// In-process event bus.
     pub bus: Arc<BroadcastBus>,
     /// SSE heartbeat driver for `/api/v1/event`.
@@ -47,8 +47,8 @@ pub struct AppState {
     pub question_runtime: Arc<dyn QuestionRuntime>,
     /// LLM provider registry (may be empty when harness is disabled).
     pub registry: Arc<ModelRegistry>,
-    /// Provider catalog service for public provider/config metadata.
-    pub provider_catalog: Arc<ProviderCatalogService>,
+    /// Cached provider model metadata loaded at startup.
+    pub provider_catalog_models: Arc<Vec<ModelInfo>>,
     /// Provider auth discovery + oauth orchestration service.
     pub provider_auth: Arc<ProviderAuthService>,
     /// Provider account persistence + active-state service.
@@ -56,4 +56,29 @@ pub struct AppState {
     /// When `true`, the manual provider harness route is active.
     /// Set by reading `OPENCODE_MANUAL_HARNESS=1` at startup.
     pub harness: bool,
+}
+
+impl AppState {
+    /// Resolve latest layered runtime config through [`ConfigService`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when config files/env overrides cannot be read
+    /// or validated.
+    pub async fn resolved_config(&self) -> Result<Config, ConfigError> {
+        self.config_service.resolve().await
+    }
+
+    /// Build a provider catalog view from the latest resolved config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when resolving runtime config fails.
+    pub async fn provider_catalog_view(&self) -> Result<ProviderCatalogService, ConfigError> {
+        let cfg = self.resolved_config().await?;
+        Ok(ProviderCatalogService::new_with_models(
+            cfg,
+            self.provider_catalog_models.as_ref().clone(),
+        ))
+    }
 }

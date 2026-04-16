@@ -140,26 +140,41 @@ impl Config {
         let mut merged = Self::default();
 
         // 1. Global user config
-        if let Some(home) = dirs_home() {
-            let global = home.join(".config").join("opencode").join("config.jsonc");
-            if global.exists() {
-                let partial = load_jsonc(&global).await?;
-                merged = merge(merged, partial);
+        if let Some(global) = default_global_config_path() {
+            if let Some(partial) = load_optional_jsonc(&global).await? {
+                merged = merge_configs(merged, partial);
             }
         }
 
         // 2. Project-local config
-        let local = project_dir.join(".opencode").join("config.jsonc");
-        if local.exists() {
-            let partial = load_jsonc(&local).await?;
-            merged = merge(merged, partial);
+        let local = local_config_path(project_dir);
+        if let Some(partial) = load_optional_jsonc(&local).await? {
+            merged = merge_configs(merged, partial);
         }
 
         // 3. Environment variables
-        apply_env(&mut merged);
+        apply_env_overrides(&mut merged);
 
         Ok(merged)
     }
+}
+
+/// Build the project-local config file path.
+#[must_use]
+pub fn local_config_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(".opencode").join("config.jsonc")
+}
+
+/// Build the global user config file path for an explicit `home` path.
+#[must_use]
+pub fn global_config_path_for_home(home: &Path) -> PathBuf {
+    home.join(".config").join("opencode").join("config.jsonc")
+}
+
+/// Resolve the global user config path from `$HOME`.
+#[must_use]
+pub fn default_global_config_path() -> Option<PathBuf> {
+    dirs_home().map(|home| global_config_path_for_home(&home))
 }
 
 /// Read and parse a JSONC file into a `Config`.
@@ -177,8 +192,16 @@ async fn load_jsonc(path: &Path) -> Result<Config, ConfigError> {
     })
 }
 
+/// Read and parse a JSONC file if it exists.
+pub async fn load_optional_jsonc(path: &Path) -> Result<Option<Config>, ConfigError> {
+    if path.exists() {
+        return load_jsonc(path).await.map(Some);
+    }
+    Ok(None)
+}
+
 /// Deep-merge `b` into `a` (fields in `b` win where `Some`).
-fn merge(mut a: Config, b: Config) -> Config {
+pub(crate) fn merge_configs(mut a: Config, b: Config) -> Config {
     if b.model.is_some() {
         a.model = b.model;
     }
@@ -200,6 +223,12 @@ fn merge(mut a: Config, b: Config) -> Config {
     if b.server.auth_token.is_some() {
         a.server.auth_token = b.server.auth_token;
     }
+    if b.server.host != default_host() {
+        a.server.host = b.server.host;
+    }
+    if b.server.port != default_port() {
+        a.server.port = b.server.port;
+    }
 
     if let Some(v) = b.providers.anthropic {
         a.providers.anthropic = Some(v);
@@ -215,7 +244,7 @@ fn merge(mut a: Config, b: Config) -> Config {
 }
 
 /// Override config fields from `OPENCODE_*` environment variables.
-fn apply_env(cfg: &mut Config) {
+pub(crate) fn apply_env_overrides(cfg: &mut Config) {
     if let Ok(v) = std::env::var("OPENCODE_MODEL") {
         cfg.model = Some(v);
     }
@@ -235,6 +264,9 @@ fn apply_env(cfg: &mut Config) {
         if let Ok(p) = v.parse() {
             cfg.server.port = p;
         }
+    }
+    if let Ok(v) = std::env::var("OPENCODE_SERVER_HOST") {
+        cfg.server.host = v;
     }
     if let Ok(v) = std::env::var("OPENCODE_AUTH_TOKEN") {
         cfg.server.auth_token = Some(v);
@@ -279,6 +311,22 @@ mod tests {
         let cfg = Config::load(dir.path()).await.unwrap();
         assert_eq!(cfg.model.as_deref(), Some("openai/gpt-4o"));
         assert_eq!(cfg.log_level, "debug");
+    }
+
+    #[tokio::test]
+    async fn local_server_host_and_port_override_defaults() {
+        let dir = TempDir::new().unwrap();
+        let oc = dir.path().join(".opencode");
+        std::fs::create_dir_all(&oc).unwrap();
+        write_jsonc(
+            &oc,
+            "config.jsonc",
+            r#"{ "server": { "host": "0.0.0.0", "port": 5050 } }"#,
+        );
+
+        let cfg = Config::load(dir.path()).await.unwrap();
+        assert_eq!(cfg.server.host, "0.0.0.0");
+        assert_eq!(cfg.server.port, 5050);
     }
 
     #[tokio::test]
@@ -373,6 +421,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_host_env_var() {
+        unsafe { std::env::set_var("OPENCODE_SERVER_HOST", "127.0.0.2") };
+        let dir = TempDir::new().unwrap();
+        let cfg = Config::load(dir.path()).await.unwrap();
+        assert_eq!(cfg.server.host, "127.0.0.2");
+        unsafe { std::env::remove_var("OPENCODE_SERVER_HOST") };
+    }
+
+    #[tokio::test]
     async fn log_level_env_var() {
         unsafe { std::env::set_var("OPENCODE_LOG_LEVEL", "warn") };
         let dir = TempDir::new().unwrap();
@@ -399,5 +456,20 @@ mod tests {
         write_jsonc(&oc, "config.jsonc", "{ bad json !!!}");
         let result = Config::load(dir.path()).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn local_config_path_helper_points_to_project_dot_opencode_file() {
+        let path = local_config_path(Path::new("/tmp/workspace"));
+        assert_eq!(path, PathBuf::from("/tmp/workspace/.opencode/config.jsonc"));
+    }
+
+    #[test]
+    fn global_config_path_helper_points_to_user_config_file() {
+        let path = global_config_path_for_home(Path::new("/tmp/home"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/home/.config/opencode/config.jsonc")
+        );
     }
 }

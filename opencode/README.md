@@ -11,7 +11,7 @@ This crate is the runnable entrypoint for the workspace. It keeps `src/main.rs` 
 | Command | Status | Current behavior |
 | --- | --- | --- |
 | default / `run` | stub | Logs that TUI mode is not implemented yet |
-| `server --port <n>` | active | Starts the Axum HTTP server and initializes SQLite storage |
+| `server [--host <h>] [--port <n>]` | active | Starts the Axum HTTP server and initializes SQLite storage; bind precedence is `CLI > resolved config > defaults` |
 | `prompt <text>` | stub | Parsed, but one-shot CLI prompt mode is still not implemented |
 | `version` | active | Prints `opencode <version>` |
 | `config --show` | active | Loads merged config and prints it as JSON |
@@ -22,6 +22,8 @@ This crate is the runnable entrypoint for the workspace. It keeps `src/main.rs` 
 
 - The current working directory is used as the project root.
 - Starting the server creates or opens `./opencode.db`.
+- Startup builds one shared `ConfigService` for both initial config resolution and request-time config/provider views.
+- Config resolution order is `defaults < global config < local config < env`; CLI bind flags override host/port only.
 - `OPENCODE_MANUAL_HARNESS=1` enables the manual provider streaming route.
 - Standard providers are registered for the harness only when that environment variable is set.
 - Server startup wires `SessionEngine` from `opencode-session`, so session prompt/cancel APIs are runtime-backed.
@@ -60,6 +62,10 @@ Key notes:
 - `GET /api/v1/provider/account`
 - `POST /api/v1/provider/account/use`
 - `DELETE /api/v1/provider/account/:account_id`
+- `GET /api/v1/config`
+- `PATCH /api/v1/config`
+- `GET /api/v1/global/config`
+- `PATCH /api/v1/global/config`
 - `GET /api/v1/config/providers`
 
 Manual-only route (diagnostics):

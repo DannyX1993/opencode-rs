@@ -31,10 +31,14 @@ pub enum Command {
     Run,
 
     /// Start the HTTP API server in headless mode.
+    /// Bind precedence: CLI > resolved config > defaults.
     Server {
-        /// Port to listen on.
-        #[arg(short, long, default_value_t = 4141)]
-        port: u16,
+        /// Bind host override (CLI > resolved config > defaults).
+        #[arg(long)]
+        host: Option<String>,
+        /// Bind port override (CLI > resolved config > defaults).
+        #[arg(short, long)]
+        port: Option<u16>,
     },
 
     /// Run a single one-shot prompt and exit.
@@ -86,7 +90,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn default_no_subcommand() {
@@ -105,13 +109,47 @@ mod tests {
     #[test]
     fn server_subcommand_default_port() {
         let cli = Cli::try_parse_from(["opencode", "server"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Server { port: 4141 })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Server {
+                host: None,
+                port: None
+            })
+        ));
     }
 
     #[test]
     fn server_subcommand_custom_port() {
         let cli = Cli::try_parse_from(["opencode", "server", "--port", "8080"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Server { port: 8080 })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Server {
+                host: None,
+                port: Some(8080)
+            })
+        ));
+    }
+
+    #[test]
+    fn server_subcommand_custom_host() {
+        let cli = Cli::try_parse_from(["opencode", "server", "--host", "127.0.0.9"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Server {
+                host: Some(ref host),
+                port: None
+            }) if host == "127.0.0.9"
+        ));
+    }
+
+    #[test]
+    fn server_help_mentions_bind_precedence() {
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        assert!(
+            help.contains("CLI > resolved config > defaults"),
+            "expected precedence hint in help text, got: {help}"
+        );
     }
 
     #[test]
