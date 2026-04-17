@@ -183,9 +183,10 @@ impl Session for SessionEngine {
 
             let supports_runtime_tools = provider_supports_runtime_tools(provider_id);
             let tool_registry = if supports_runtime_tools {
-                let mut tool_ctx = Ctx::default_for(PathBuf::from(&project_row.worktree));
-                tool_ctx.cwd = PathBuf::from(&session_row.directory);
-                Some(ToolRegistry::with_builtins(tool_ctx))
+                Some(ToolRegistry::with_builtins(runtime_tool_ctx(
+                    &project_row.worktree,
+                    &session_row.directory,
+                )))
             } else {
                 None
             };
@@ -565,6 +566,15 @@ fn provider_supports_runtime_tools(provider_id: &str) -> bool {
     // Bounded MVP gate: only providers whose adapters can round-trip persisted tool history
     // without lossy replay are allowed into the runtime tool loop.
     matches!(provider_id, "anthropic" | "google")
+}
+
+fn runtime_tool_ctx(project_worktree: &str, session_directory: &str) -> Ctx {
+    // Runtime contract preservation:
+    // - tool root comes from persisted `project.worktree`
+    // - tool cwd comes from persisted `session.directory`
+    let mut tool_ctx = Ctx::default_for(PathBuf::from(project_worktree));
+    tool_ctx.cwd = PathBuf::from(session_directory);
+    tool_ctx
 }
 
 fn permission_patterns_for_tool_call(name: &str, input: &serde_json::Value) -> Vec<String> {
@@ -2758,5 +2768,20 @@ mod tests {
                 && input["command"] == "ls"
                 && thought_signature.as_deref() == Some("sig-history")
         ));
+    }
+
+    #[test]
+    fn runtime_tool_ctx_uses_project_worktree_as_root() {
+        let ctx = runtime_tool_ctx("/workspace/project", "/workspace/project/subdir");
+        assert_eq!(ctx.root, std::path::PathBuf::from("/workspace/project"));
+    }
+
+    #[test]
+    fn runtime_tool_ctx_uses_session_directory_as_cwd() {
+        let ctx = runtime_tool_ctx("/workspace/project", "/workspace/project/session-cwd");
+        assert_eq!(
+            ctx.cwd,
+            std::path::PathBuf::from("/workspace/project/session-cwd")
+        );
     }
 }

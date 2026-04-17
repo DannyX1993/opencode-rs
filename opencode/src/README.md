@@ -1,13 +1,18 @@
 # opencode/src
 
-Binary implementation modules for the `opencode` executable.
+Implementation modules for the `opencode` binary crate.
 
 ## Modules
 
-- `main.rs` — thin process entrypoint.
-- `lib.rs` — command dispatch and server bootstrap used by tests.
+- `main.rs` — thin process entrypoint
+- `lib.rs` — command dispatch + server bootstrap + startup/runtime tests
 
-## Current notes
+## Version note
 
-- `lib.rs` wires `SessionEngine`, provider services, storage, the event bus, and the default SSE heartbeat driver into `opencode-server::AppState`.
-- The `version` command reflects the workspace release version (`0.11.0` in this batch).
+- `version` command reflects workspace release **`0.12.0`**
+
+## Startup/testing notes
+
+- Startup tests use readiness polling (`wait_for_server_ready`) instead of fixed sleeps.
+- Startup/test behavior is expected to remain stable even when project foundation metadata is present/partial/unknown.
+- `lib.rs` composes state from `opencode-server`, `opencode-storage`, `opencode-session`, and provider services.

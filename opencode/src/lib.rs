@@ -162,11 +162,57 @@ mod tests {
     use clap::Parser;
     use opencode_cli::cli::Cli;
     use tempfile::TempDir;
+    use tokio::time::{Duration, Instant};
 
     async fn dispatch_from(args: &[&str]) -> Result<()> {
         let cli = Cli::try_parse_from(args).unwrap();
         let dir = TempDir::new().unwrap();
         dispatch(cli, dir.path()).await
+    }
+
+    async fn wait_for_server_ready(port: u16) {
+        let client = reqwest::Client::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let health_url = format!("http://127.0.0.1:{port}/health");
+        loop {
+            let last_error = match client.get(&health_url).send().await {
+                Ok(response) if response.status().is_success() => return,
+                Ok(response) => format!("unexpected status {}", response.status()),
+                Err(error) => error.to_string(),
+            };
+
+            if Instant::now() >= deadline {
+                panic!("server did not become ready at {health_url}: {last_error}");
+            }
+
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[test]
+    fn startup_tests_avoid_fixed_sleep_waits() {
+        let source = include_str!("lib.rs");
+        let forbidden = [
+            "tokio::time::sleep",
+            "(std::time::Duration::from_millis(",
+            "100",
+            ")).await",
+        ]
+        .concat();
+        assert!(
+            !source.contains(&forbidden),
+            "startup tests should use wait_for_server_ready instead of fixed sleep"
+        );
+    }
+
+    #[test]
+    fn startup_tests_reuse_readiness_polling_helper() {
+        let source = include_str!("lib.rs");
+        let readiness_calls = source.matches("wait_for_server_ready(port).await;").count();
+        assert!(
+            readiness_calls >= 6,
+            "expected startup tests to poll readiness in multiple scenarios, found {readiness_calls}"
+        );
     }
 
     #[tokio::test]
@@ -205,7 +251,7 @@ mod tests {
 
     #[test]
     fn package_version_matches_next_minor_release() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.11.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.12.0");
     }
 
     // RED S.1 — `server` subcommand binds a real TCP socket and serves health
@@ -233,7 +279,7 @@ mod tests {
         });
 
         // Give the server time to bind.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_server_ready(port).await;
 
         let url = format!("http://127.0.0.1:{port}/health");
         let resp = reqwest::get(&url).await.expect("health request failed");
@@ -273,7 +319,7 @@ mod tests {
             .unwrap();
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_server_ready(port).await;
 
         let url = format!("http://127.0.0.1:{port}/health");
         let resp = reqwest::get(&url).await.expect("health request failed");
@@ -320,7 +366,7 @@ mod tests {
             .unwrap();
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_server_ready(cli_port).await;
 
         let health_resp = reqwest::get(format!("http://127.0.0.1:{cli_port}/health"))
             .await
@@ -367,7 +413,7 @@ mod tests {
             .unwrap();
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_server_ready(port).await;
 
         let cli = reqwest::Client::new();
         let resp = cli
@@ -417,7 +463,7 @@ mod tests {
             .unwrap();
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_server_ready(port).await;
 
         let sid = opencode_core::id::SessionId::new();
         let resp = reqwest::Client::new()
@@ -487,7 +533,7 @@ mod tests {
             .unwrap();
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_server_ready(port).await;
 
         let cli = reqwest::Client::new();
         let provider_resp = cli
@@ -538,7 +584,7 @@ mod tests {
             .unwrap();
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_server_ready(port).await;
 
         let cli = reqwest::Client::new();
         let authorize_resp = cli

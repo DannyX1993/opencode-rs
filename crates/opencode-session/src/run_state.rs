@@ -13,6 +13,11 @@ pub struct RunSnapshot {
     pub is_cancelled: bool,
 }
 
+impl RunSnapshot {
+    /// Domain scope marker: run snapshots are session-runtime only.
+    pub const DOMAIN_SCOPE: &str = "session_runtime";
+}
+
 #[derive(Debug, Default)]
 struct RunStateInner {
     sessions: Mutex<HashMap<SessionId, CancellationToken>>,
@@ -237,5 +242,20 @@ mod tests {
 
         drop(guard_b);
         assert!(runs.list_active_sessions().await.is_empty());
+    }
+
+    #[test]
+    fn run_snapshot_name_is_reserved_for_runtime_domain() {
+        assert_eq!(RunSnapshot::DOMAIN_SCOPE, "session_runtime");
+        assert!(
+            !std::any::type_name::<opencode_core::project::ProjectFoundationRecord>()
+                .contains("Snapshot")
+        );
+        assert!(
+            !std::any::type_name::<opencode_core::project::WorktreeState>().contains("Snapshot")
+        );
+        assert!(
+            !std::any::type_name::<opencode_core::project::RepositoryState>().contains("Snapshot")
+        );
     }
 }

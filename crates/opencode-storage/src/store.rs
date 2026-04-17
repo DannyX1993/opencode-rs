@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use opencode_core::{
     dto::{
         AccountRow, AccountStateRow, ControlAccountRow, MessageRow, MessageWithParts, PartRow,
-        PermissionRow, ProjectRow, SessionRow, TodoRow,
+        PermissionRow, ProjectFoundationRow, ProjectRow, SessionRow, TodoRow,
     },
     error::StorageError,
     id::{AccountId, ProjectId, SessionId},
@@ -13,7 +13,7 @@ use sqlx::SqlitePool;
 
 use crate::{
     event_store::SyncEventStore,
-    repo::{account, message, permission, project, session, todo},
+    repo::{account, message, permission, project, project_repository_state, session, todo},
 };
 
 /// Unified storage facade used by session and server layers.
@@ -29,6 +29,26 @@ pub trait Storage: Send + Sync {
     async fn get_project(&self, id: ProjectId) -> Result<Option<ProjectRow>, StorageError>;
     /// List all projects.
     async fn list_projects(&self) -> Result<Vec<ProjectRow>, StorageError>;
+    /// Fetch additive project-foundation companion state.
+    ///
+    /// Callers may lazily backfill by probing and writing foundation state when
+    /// this returns `None` for an existing project.
+    async fn get_project_foundation(
+        &self,
+        _project_id: ProjectId,
+    ) -> Result<Option<ProjectFoundationRow>, StorageError> {
+        Ok(None)
+    }
+    /// Upsert additive project-foundation companion state.
+    ///
+    /// This keeps `project` CRUD additive: repository/worktree metadata evolves
+    /// in a companion table without mutating the legacy project schema.
+    async fn upsert_project_foundation(
+        &self,
+        _row: ProjectFoundationRow,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
 
     // ── Sessions ─────────────────────────────────────────────────────────────
     /// Create a new session row.
@@ -146,6 +166,18 @@ impl Storage for StorageImpl {
     }
     async fn list_projects(&self) -> Result<Vec<ProjectRow>, StorageError> {
         project::list(&self.pool).await
+    }
+    async fn get_project_foundation(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Option<ProjectFoundationRow>, StorageError> {
+        project_repository_state::get(&self.pool, project_id).await
+    }
+    async fn upsert_project_foundation(
+        &self,
+        row: ProjectFoundationRow,
+    ) -> Result<(), StorageError> {
+        project_repository_state::upsert(&self.pool, &row).await
     }
 
     async fn create_session(&self, row: SessionRow) -> Result<(), StorageError> {
@@ -270,6 +302,7 @@ mod tests {
     use opencode_core::{
         dto::AccountStateRow,
         id::{AccountId, MessageId, PartId, ProjectId, SessionId},
+        project::{RepositoryState, WorktreeState},
     };
     use serde_json::json;
     use sqlx::Executor;
@@ -627,5 +660,37 @@ mod tests {
         let active = s.get_active_control_account().await.unwrap().unwrap();
         assert_eq!(active.email, "active@test.com");
         assert!(active.active);
+    }
+
+    #[tokio::test]
+    async fn storage_impl_project_foundation_round_trips_partial_fields() {
+        let (s, _f) = make_storage().await;
+        let pid = ProjectId::new();
+        s.upsert_project(proj(pid)).await.unwrap();
+
+        s.upsert_project_foundation(ProjectFoundationRow {
+            project_id: pid,
+            canonical_worktree: Some("/tmp".into()),
+            repository_root: None,
+            vcs_kind: None,
+            worktree_state: WorktreeState {
+                branch: Some("main".into()),
+                head_oid: None,
+                is_dirty: Some(false),
+            },
+            repository_state: RepositoryState::default(),
+            sync_basis: None,
+            time_created: 10,
+            time_updated: 11,
+        })
+        .await
+        .unwrap();
+
+        let got = s.get_project_foundation(pid).await.unwrap().unwrap();
+        assert_eq!(got.project_id, pid);
+        assert_eq!(got.canonical_worktree.as_deref(), Some("/tmp"));
+        assert_eq!(got.vcs_kind, None);
+        assert_eq!(got.worktree_state.branch.as_deref(), Some("main"));
+        assert_eq!(got.worktree_state.head_oid, None);
     }
 }

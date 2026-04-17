@@ -505,11 +505,12 @@ mod tests {
     use opencode_core::{
         config::Config,
         dto::{
-            AccountRow, AccountStateRow, ControlAccountRow, MessageRow, PermissionRow, ProjectRow,
-            TodoRow,
+            AccountRow, AccountStateRow, ControlAccountRow, MessageRow, PermissionRow,
+            ProjectFoundationRow, ProjectRow, TodoRow,
         },
         error::{SessionError, StorageError},
         id::{AccountId, MessageId, PartId, ProjectId, SessionId},
+        project::{RepositoryState, WorktreeState},
     };
     use opencode_provider::{AccountService, ProviderAuthService};
     use opencode_session::{
@@ -526,6 +527,7 @@ mod tests {
     struct Stub {
         sessions: Mutex<Vec<SessionRow>>,
         messages: Mutex<Vec<MessageWithParts>>,
+        foundations: Mutex<Vec<ProjectFoundationRow>>,
     }
 
     #[async_trait]
@@ -538,6 +540,27 @@ mod tests {
         }
         async fn list_projects(&self) -> Result<Vec<ProjectRow>, StorageError> {
             Ok(vec![])
+        }
+        async fn get_project_foundation(
+            &self,
+            project_id: ProjectId,
+        ) -> Result<Option<ProjectFoundationRow>, StorageError> {
+            Ok(self
+                .foundations
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|row| row.project_id == project_id)
+                .cloned())
+        }
+        async fn upsert_project_foundation(
+            &self,
+            row: ProjectFoundationRow,
+        ) -> Result<(), StorageError> {
+            let mut foundations = self.foundations.lock().unwrap();
+            foundations.retain(|existing| existing.project_id != row.project_id);
+            foundations.push(row);
+            Ok(())
         }
         async fn create_session(&self, row: SessionRow) -> Result<(), StorageError> {
             self.sessions.lock().unwrap().push(row);
@@ -939,6 +962,22 @@ mod tests {
                 data: serde_json::json!({"type": "text", "text": "hello"}),
             }],
         }
+    }
+
+    async fn seed_project_foundation(stub: Arc<Stub>, pid: ProjectId) {
+        stub.upsert_project_foundation(ProjectFoundationRow {
+            project_id: pid,
+            canonical_worktree: Some(format!("/tmp/{pid}")),
+            repository_root: None,
+            vcs_kind: None,
+            worktree_state: WorktreeState::default(),
+            repository_state: RepositoryState::default(),
+            sync_basis: None,
+            time_created: 1000,
+            time_updated: 1001,
+        })
+        .await
+        .expect("foundation seed should succeed");
     }
 
     // ── Task 6.1: POST /api/v1/projects/:pid/sessions → 201 ──────────────────
@@ -1712,5 +1751,61 @@ mod tests {
         assert_eq!(rows[0]["status"]["type"], "blocked");
         assert_eq!(rows[0]["status"]["kind"], "question");
         assert_eq!(rows[0]["status"]["requestID"], "question-route-test");
+    }
+
+    #[tokio::test]
+    async fn foundation_metadata_does_not_change_prompt_route_behavior() {
+        let pid = ProjectId::new();
+        let sid = SessionId::new();
+        let stub = Arc::new(Stub::default());
+        stub.create_session(sess(sid, pid)).await.unwrap();
+        seed_project_foundation(Arc::clone(&stub), pid).await;
+
+        let session = Arc::new(StubSession::new(StubSessionMode::Success));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/sessions/{sid}/prompt"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({"text": "hello with foundation"})).unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app_arc_with_session(Arc::clone(&stub), session)
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn foundation_metadata_does_not_change_session_history_route_behavior() {
+        let pid = ProjectId::new();
+        let sid = SessionId::new();
+        let mid = MessageId::new();
+        let stub = Arc::new(Stub::default());
+        stub.create_session(sess(sid, pid)).await.unwrap();
+        seed_project_foundation(Arc::clone(&stub), pid).await;
+
+        let mwp = msg_with_parts(mid, sid);
+        stub.append_message(mwp.info.clone(), mwp.parts.clone())
+            .await
+            .unwrap();
+
+        let resp = app_arc(Arc::clone(&stub))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/sessions/{sid}/messages"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let rows: Vec<MessageWithParts> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].info.id, mid);
     }
 }

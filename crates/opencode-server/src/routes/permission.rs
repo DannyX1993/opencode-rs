@@ -262,7 +262,7 @@ mod tests {
             Some("call-perm-route")
         );
 
-        let _ = ask.abort();
+        ask.abort();
     }
 
     #[tokio::test]

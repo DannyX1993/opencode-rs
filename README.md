@@ -1,155 +1,71 @@
 # opencode-rs
 
-Rust workspace for the `opencode` runtime, server surface, and core libraries.
+Rust workspace for the `opencode` runtime, HTTP server, domain crates, and SQLite persistence.
 
-> Scope note: this README documents the Rust workspace in this directory only.
-> `opencode-ts/` is intentionally out of scope.
+> Scope: this README documents the Rust workspace only. `opencode-ts/` is out of scope.
 
-## Project Status
+## Release
 
-The workspace is **partially production-shaped**: core crates are functional (CLI, storage, provider adapters, HTTP routes, provider/account domain services, and session runtime core), while some user-facing surfaces remain intentionally stubbed.
+- Current workspace release: **`0.12.0`**
+- Tag convention: **`v<semver>`** (for this cycle: `v0.12.0`)
+- Crates use `version.workspace = true`, so all Rust packages stay lockstep with `[workspace.package]`.
 
-Current milestone reflected in this repo state: **`port-config-and-global-state` (implemented + release-prep docs updated)**.
+## What landed in this change stream
 
-## Workspace Architecture (high level)
+`port-project-git-snapshot-worktree-foundations` adds a durable **project repository foundation** layer while preserving existing runtime behavior.
+
+### Design intent
+
+1. Keep runtime contract unchanged:
+   - tool/runtime `root` continues to use `project.worktree`
+   - runtime `cwd` continues to use `session.directory`
+2. Persist canonical repository/worktree metadata in an additive seam.
+3. Keep naming boundaries clear:
+   - repository/worktree state uses `worktree_state`, `repository_state`, `sync_basis`
+   - `RunSnapshot` remains session-runtime terminology only.
+
+### New foundation behavior
+
+- Project upsert flow (`PUT /api/v1/projects/:id`) now probes the worktree and persists companion foundation data.
+- Persistence lives in additive table `project_repository_state` (migration `0002_project_repository_foundation.sql`).
+- If repository metadata is not available (non-git path, git command unavailable, partial probe), persistence still succeeds with unknown fields (`None`) rather than invented values.
+- Existing `/api/v1/projects` response shape remains unchanged (foundation fields are internal persistence/state data, not newly exposed API payloads).
+
+## Workspace architecture (high level)
 
 ```text
 opencode (binary)
-  └─ opencode-cli (command parsing/bootstrap)
-      ├─ opencode-server (HTTP routes)
-      │   ├─ opencode-session (prompt/cancel runtime core)
-      │   ├─ opencode-storage (SQLite repositories + migrations)
-      │   ├─ opencode-provider (runtime adapters + catalog/auth/account services)
-      │   └─ opencode-bus (in-process event fan-out)
-      └─ opencode-tool (tool runtime + built-ins)
+  └─ opencode-cli
+      ├─ opencode-server
+      │   ├─ opencode-session
+      │   ├─ opencode-storage
+      │   ├─ opencode-provider
+      │   └─ opencode-bus
+      └─ opencode-tool
 
 opencode-core provides shared DTOs/config/errors/IDs across all crates.
 ```
 
-## Workspace Layout
+## Key boundaries
 
-| Path | Type | Status | Responsibility |
-| --- | --- | --- | --- |
-| `opencode/` | binary crate | active | Runtime entrypoint and command dispatch |
-| `crates/opencode-cli/` | library crate | active | Clap definitions, bootstrap, `tool` command wiring |
-| `crates/opencode-core/` | library crate | active | Shared config, DTOs, IDs, errors, tracing/context helpers |
-| `crates/opencode-provider/` | library crate | active | Runtime model adapters plus provider catalog/auth/account services |
-| `crates/opencode-server/` | library crate | active | Axum router + project/session routes, permission/question runtime routes, SSE event stream, and provider/config/account contracts |
-| `crates/opencode-storage/` | library crate | active | SQLite persistence, migrations, repositories, account state, event storage |
-| `crates/opencode-tool/` | library crate | active | Tool trait, registry, built-in read/list/glob/grep/write/bash tools |
-| `crates/opencode-bus/` | library crate | partial | Typed in-process broadcast bus with lifecycle/runtime events, including permission/question ask/reply/reject |
-| `crates/opencode-session/` | library crate | partial | Session runtime core: prompt lifecycle, permission/question interactive runtimes, blocked status, detached execution, cancellation |
-| `crates/opencode-lsp/` | library crate | stub | Placeholder for future LSP integration |
-| `crates/opencode-mcp/` | library crate | stub | Placeholder for future MCP integration |
-| `crates/opencode-plugin/` | library crate | stub | Placeholder for future plugin host |
-| `crates/opencode-tui/` | library crate | stub | Placeholder for future terminal UI |
-| `docs/` | docs | active | Manual testing + architecture/runtime notes |
-| `scripts/` | scripts | active | Helper scripts (coverage, etc.) |
+- `opencode-core`: shared domain contracts (including project-foundation structs/traits).
+- `opencode-storage`: additive persistence seam (`project_repository_state`) + storage trait methods.
+- `opencode-server`: thin route adapters; project route orchestrates probe + persistence.
+- `opencode-session`: runtime engine and run-state semantics; unchanged root/cwd contract guarded by tests.
 
-## Permission/question runtime parity completed in this change stream
+## Git/non-git fallback policy
 
-The `port-permission-and-question-runtime` slice is now landed in code, docs, and tests:
+Foundation persistence is intentionally additive and tolerant:
 
-- Session runtime now includes permission and question runtimes with explicit ask/reply/reject lifecycle and in-memory pending queues.
-- Public HTTP routes now include `/api/v1/permission*` and `/api/v1/question*` for listing and resolving pending runtime prompts.
-- Runtime status now supports blocked shapes: `{ "type": "blocked", "kind": "permission|question", "requestID": "..." }`.
-- Public SSE route `GET /api/v1/event` now translates `permission.asked`, `permission.replied`, `question.asked`, `question.replied`, and `question.rejected` in addition to existing lifecycle/tool events.
-- Durable allow-always semantics are implemented by merging normalized `allow` rules into project permission storage.
+- **Git available + repo detected** → persist canonical worktree + repository metadata.
+- **Git unavailable / command error / non-git path** → persist canonical worktree (when resolvable) with unknown repo fields.
+- **Partial inspectability** → persist known fields, leave unknown fields as `None`.
 
-## Config/global-state parity completed in this change stream
+This enables later enrichment without blocking current project/session workflows.
 
-The `port-config-and-global-state` slice is now landed in code, docs, and tests:
+## Validation gates (required)
 
-- `opencode-core` now exposes a shared `ConfigService` that resolves layered runtime config once (`defaults < global < local < env`) and caches results.
-- Runtime bind precedence is now explicit and consistent: **CLI bind overrides > resolved config > defaults** (host/port only).
-- `opencode-server::AppState` now stores `Arc<ConfigService>` rather than a startup config snapshot, so handlers can fetch fresh resolved config on demand.
-- New scoped config APIs are available:
-  - `GET /api/v1/config` + `PATCH /api/v1/config` for local/project config
-  - `GET /api/v1/global/config` + `PATCH /api/v1/global/config` for global/user config
-- Successful scoped writes invalidate the resolved cache; failed writes keep the previous cached resolved state.
-- Provider listing/config views are now derived from the latest resolved config per request.
-
-## Provider/auth/account parity retained from the prior stream
-
-The `port-provider-auth-and-account-parity` slice is now landed in code and tests:
-
-- Public provider surface now includes catalog, auth methods, OAuth authorize/callback, account-state reads, active-account switching, account removal, and `/api/v1/config/providers`.
-- `ProviderCatalogService`, `ProviderAuthService`, and `AccountService` are explicit domain services; Axum handlers remain thin adapters.
-- Account persistence and active state reuse existing SQLite tables (`account`, `account_state`, `control_account`) with no schema migration.
-- Startup overlays provider catalog models from `.opencode/models.json` cache when present; built-in provider defaults remain fallback.
-
-## Runtime/session scope retained and extended
-
-- `SessionEngine::prompt` rebuilds provider requests from persisted session history.
-- Anthropic and Google session turns can complete provider-driven built-in tool loops (`provider -> tool -> provider -> done`).
-- Assistant `tool_use` parts and `tool_result` messages are persisted for replay.
-- Tool lifecycle events are published on `opencode-bus` (`ToolStarted`, `ToolFinished { ok }`).
-- Session runtime status is queryable through singular parity routes and now includes blocked states for permission/question waits.
-- Detached prompt requests return acceptance metadata immediately while background execution continues.
-
-Detailed runtime notes: [`docs/SESSION_RUNTIME.md`](docs/SESSION_RUNTIME.md).
-
-## HTTP surface (currently wired)
-
-- `GET /health`
-- `GET /api/v1/projects`
-- `PUT /api/v1/projects/:id`
-- `GET /api/v1/projects/:id`
-- `POST /api/v1/projects/:pid/sessions`
-- `GET /api/v1/projects/:pid/sessions`
-- `GET /api/v1/sessions/:sid`
-- `PATCH /api/v1/sessions/:sid`
-- `GET /api/v1/sessions/:sid/messages`
-- `POST /api/v1/sessions/:sid/messages`
-- `POST /api/v1/sessions/:sid/prompt`
-- `POST /api/v1/sessions/:sid/cancel`
-- `GET /api/v1/session/status`
-- `GET /api/v1/session/:sid/status`
-- `POST /api/v1/session/:sid/abort`
-- `GET /api/v1/session/:sid/message`
-- `POST /api/v1/session/:sid/prompt`
-- `GET /api/v1/permission`
-- `POST /api/v1/permission/reply`
-- `GET /api/v1/question`
-- `POST /api/v1/question/reply`
-- `POST /api/v1/question/reject`
-- `GET /api/v1/event`
-- `GET /api/v1/provider`
-- `GET /api/v1/provider/auth`
-- `POST /api/v1/provider/:provider/oauth/authorize`
-- `POST /api/v1/provider/:provider/oauth/callback`
-- `GET /api/v1/provider/account`
-- `POST /api/v1/provider/account/use`
-- `DELETE /api/v1/provider/account/:account_id`
-- `GET /api/v1/config`
-- `PATCH /api/v1/config`
-- `GET /api/v1/global/config`
-- `PATCH /api/v1/global/config`
-- `GET /api/v1/config/providers`
-- `POST /api/v1/provider/stream` (manual harness only)
-
-## Manual validation expectations
-
-- Use provider parity routes without harness flag for catalog/auth/account checks.
-- Use `GET /api/v1/event` for runtime SSE checks; expect a `server.connected` frame first and `server.heartbeat` while idle.
-- Use singular `/api/v1/session/*` aliases for upstream-style clients; status can return `idle`, `busy`, or blocked runtime objects.
-- Validate permission/question flows through `/api/v1/permission*` and `/api/v1/question*` and confirm `ok: true|false` reply contracts.
-- Validate durable allow-always behavior by approving with `always`, then re-triggering the same permission pattern and confirming it no longer appears in pending lists.
-- OAuth flow for manual checks is two-step: authorize endpoint first, callback endpoint second.
-- Verify persistence behavior by checking `GET /api/v1/provider/account` before and after `use`/`delete` calls.
-- Use `/api/v1/provider/stream` only for raw SSE adapter validation with `OPENCODE_MANUAL_HARNESS=1`.
-
-## Deferred scope / known caveats
-
-- `run`, `prompt <text>`, and `config` (without `--show`) CLI commands remain stubs.
-- Runtime tool loop is intentionally bounded: Anthropic/Google supported for tool-capable session turns; OpenAI is still text-only there.
-- `/api/v1/event` is live-only SSE in this release; it does not replay persisted history.
-- Singular session parity stays intentionally narrow: unsupported write parity like `POST /api/v1/session/:sid/message` is still not exposed.
-- OAuth pending authorization state is in-process only; server restart during auth requires re-authorize.
-- `opencode-lsp`, `opencode-mcp`, `opencode-plugin`, and `opencode-tui` remain scaffolding crates.
-- `/api/v1/provider/stream` is a **manual harness**, not a stable public API contract.
-
-## Development and testing
+From workspace root:
 
 ```sh
 cargo check --workspace
@@ -158,18 +74,22 @@ cargo clippy --workspace --all-targets
 ./scripts/coverage.sh --check
 ```
 
-Manual endpoint guide: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md)
+Expected quality stance:
 
-## Versioning
+- additive migrations only
+- no behavior regression in existing HTTP/runtime contracts
+- clear tests for git + non-git + unknown/partial repository states
 
-- Workspace version is currently `0.11.0` (`[workspace.package]`).
-- Crates use `version.workspace = true`, so crate versions are kept in lockstep.
-- Git tag style remains `v<semver>` (this release target: `v0.11.0`).
-- Until `1.0`, API and behavior may change between minor releases.
+## Workspace layout
 
-## More documentation
+See [`crates/README.md`](crates/README.md) for crate index and statuses.
 
-- [`crates/README.md`](crates/README.md) — crate index and status
-- [`opencode/README.md`](opencode/README.md) — binary-specific runtime notes
-- [`docs/README.md`](docs/README.md) — docs index
-- [`scripts/README.md`](scripts/README.md) — helper scripts
+## Additional docs
+
+- [`crates/opencode-core/README.md`](crates/opencode-core/README.md)
+- [`crates/opencode-storage/README.md`](crates/opencode-storage/README.md)
+- [`crates/opencode-server/README.md`](crates/opencode-server/README.md)
+- [`crates/opencode-server/src/routes/README.md`](crates/opencode-server/src/routes/README.md)
+- [`crates/opencode-session/README.md`](crates/opencode-session/README.md)
+- [`opencode/README.md`](opencode/README.md)
+- [`opencode/src/README.md`](opencode/src/README.md)

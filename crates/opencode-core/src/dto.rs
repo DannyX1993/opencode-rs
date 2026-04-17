@@ -5,6 +5,7 @@
 //! explicit `#[serde(rename)]` noise.
 
 use crate::id::{AccountId, MessageId, PartId, ProjectId, SessionId, WorkspaceId};
+use crate::project::{RepositoryState, SyncBasis, WorktreeState};
 use serde::{Deserialize, Serialize};
 
 // ─── Project ─────────────────────────────────────────────────────────────────
@@ -41,6 +42,35 @@ pub struct ProjectRow {
     /// JSON blob: custom commands.
     #[serde(default)]
     pub commands: Option<serde_json::Value>,
+}
+
+/// Durable companion row for canonical repository/worktree foundation state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFoundationRow {
+    /// Foreign key to `project`.
+    pub project_id: ProjectId,
+    /// Canonical worktree root, when known.
+    #[serde(default)]
+    pub canonical_worktree: Option<String>,
+    /// Repository root, when known.
+    #[serde(default)]
+    pub repository_root: Option<String>,
+    /// Version-control system kind, when known.
+    #[serde(default)]
+    pub vcs_kind: Option<String>,
+    /// Worktree-local state facts.
+    #[serde(default)]
+    pub worktree_state: WorktreeState,
+    /// Repository-wide durable state facts.
+    #[serde(default)]
+    pub repository_state: RepositoryState,
+    /// Optional sync anchor payload.
+    #[serde(default)]
+    pub sync_basis: Option<SyncBasis>,
+    /// Unix timestamp (ms) of creation.
+    pub time_created: i64,
+    /// Unix timestamp (ms) of last update.
+    pub time_updated: i64,
 }
 
 // ─── Workspace ───────────────────────────────────────────────────────────────
@@ -302,7 +332,10 @@ pub struct MessageWithParts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::AccountId;
+    use crate::{
+        id::AccountId,
+        project::{RepositoryState, WorktreeState},
+    };
 
     #[test]
     fn project_row_round_trips() {
@@ -397,6 +430,60 @@ mod tests {
         let back: AccountInfoDto = serde_json::from_value(json).unwrap();
         assert_eq!(dto.id, back.id);
         assert_eq!(dto.email, back.email);
+    }
+
+    #[test]
+    fn project_foundation_row_round_trips_partial_unknown_fields() {
+        let row = ProjectFoundationRow {
+            project_id: ProjectId::new(),
+            canonical_worktree: Some("/tmp/worktree".into()),
+            repository_root: None,
+            vcs_kind: None,
+            worktree_state: WorktreeState {
+                branch: Some("main".into()),
+                head_oid: None,
+                is_dirty: Some(false),
+            },
+            repository_state: RepositoryState {
+                default_branch: None,
+                head_oid: None,
+            },
+            sync_basis: None,
+            time_created: 100,
+            time_updated: 200,
+        };
+
+        let json = serde_json::to_value(&row).unwrap();
+        let back: ProjectFoundationRow = serde_json::from_value(json).unwrap();
+
+        assert_eq!(back.project_id, row.project_id);
+        assert_eq!(back.canonical_worktree.as_deref(), Some("/tmp/worktree"));
+        assert_eq!(back.vcs_kind, None);
+        assert_eq!(back.worktree_state.branch.as_deref(), Some("main"));
+        assert_eq!(back.worktree_state.head_oid, None);
+        assert_eq!(back.sync_basis, None);
+    }
+
+    #[test]
+    fn project_foundation_row_serialization_avoids_snapshot_key_names() {
+        let row = ProjectFoundationRow {
+            project_id: ProjectId::new(),
+            canonical_worktree: Some("/tmp/worktree".into()),
+            repository_root: Some("/tmp".into()),
+            vcs_kind: Some("git".into()),
+            worktree_state: WorktreeState::default(),
+            repository_state: RepositoryState::default(),
+            sync_basis: None,
+            time_created: 1,
+            time_updated: 2,
+        };
+
+        let value = serde_json::to_value(&row).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(obj.contains_key("worktree_state"));
+        assert!(obj.contains_key("repository_state"));
+        assert!(obj.contains_key("sync_basis"));
+        assert!(!obj.contains_key("snapshot"));
     }
 
     #[test]

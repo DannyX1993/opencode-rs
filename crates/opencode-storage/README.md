@@ -1,72 +1,63 @@
 # opencode-storage
 
-SQLite-backed persistence layer for the Rust workspace.
+SQLite-backed persistence boundary for the Rust workspace.
 
-## Status
+## Role
 
-Active. This crate contains real repositories, migration bootstrap, and the `Storage` trait used by the server.
+`opencode-storage` owns migrations, repository mappers, and the `Storage` trait used by server/session/provider runtime layers.
 
-## Purpose
+## Project repository foundation seam
 
-`opencode-storage` owns the persistent data boundary for the Rust workspace. It exposes a trait-based facade and a concrete SQLite implementation.
+This change adds an additive companion persistence seam for canonical repository/worktree state.
 
-## What Exists Today
+### Schema
 
-- `connect(path)` to open a SQLite pool and run migrations
-- `Storage` trait used by higher layers
-- `StorageImpl` backed by `sqlx`
-- repositories for projects, sessions, messages, todos, permissions, and accounts
-- singleton `account_state` persistence for active account/org selection
-- legacy `control_account` lookup helpers for compatibility surfaces
-- append-only sync event storage
+- New migration: `migrations/0002_project_repository_foundation.sql`
+- New table: `project_repository_state`
+- Keyed by `project_id`
+- Keeps existing `project` table/API usage stable
 
-## Data Surface
+### Storage trait additions
 
-The `Storage` trait currently supports:
+- `get_project_foundation(project_id)`
+- `upsert_project_foundation(row)`
 
-- projects
-- sessions
-- messages and parts
-- todos
-- permissions
-- accounts
-- account active state (`account_state` singleton)
-- legacy control account reads
-- raw sync events
+Both methods are additive and do not alter legacy project CRUD behavior.
 
-`list_history_with_parts` is the richer message-history API used by the server routes.
+### Repository behavior
 
-## Provider/Auth/Account parity persistence behavior
+`repo/project_repository_state.rs` maps nullable canonical/repository/vcs/sync fields and JSON state payloads.
 
-- `upsert_account` persists or refreshes provider credentials by account id.
-- `set_account_state` writes active account/org selection at singleton row id `1`.
-- `remove_account` clears dangling active state when the removed account was active.
-- Token refresh helpers update access/refresh tokens and expiry without rewriting unrelated fields.
+Fallback semantics are deliberate:
 
-These contracts are consumed by `opencode-provider::AccountService` and surfaced through `opencode-server` provider account routes.
+- missing JSON columns deserialize to defaults when appropriate
+- missing optional JSON payloads remain `None`
+- partial state persists without fabrication
 
-## Permission runtime persistence behavior
+## Boundaries
 
-- `permission` repository remains one row per project.
-- Runtime `allow-always` writes are merged via normalized rule helpers (`normalize_rules`, `merge_allow_rules`).
-- Invalid permission rule entries are filtered during normalization; merged allow rules are deduplicated.
-- This allows future matching permission asks to short-circuit without creating pending runtime entries.
+- This crate persists data; it does not execute git probing logic.
+- Probing happens at route/domain layer (`opencode-server`), then writes normalized rows through this seam.
 
-## Usage
+## Testing expectations
 
-```rust
-use opencode_storage::{connect, StorageImpl};
-
-let pool = connect(std::path::Path::new("opencode.db")).await?;
-let storage = StorageImpl::new(pool);
-```
-
-## Test
+From workspace root:
 
 ```sh
 cargo test -p opencode-storage
 ```
 
-## Workspace Role
+Tests should keep covering:
 
-This crate is the persistence backend for the current Rust server. The binary uses it when starting `opencode server`, creating or reusing `./opencode.db` in the current working directory.
+- upgrade from `0001_initial.sql` to include foundation table
+- round-trip CRUD for full and partial foundation rows
+- `None`-heavy/non-git-compatible payload persistence
+
+For full gate validation, run workspace checks from root:
+
+```sh
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets
+./scripts/coverage.sh --check
+```

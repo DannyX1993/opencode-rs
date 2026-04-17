@@ -1,53 +1,54 @@
 # opencode-core
 
-Lowest-level shared types for the Rust workspace.
+Lowest-level shared contracts for the Rust workspace.
 
-## Status
+## Role
 
-Active. This crate provides foundational code used across the current binary, server, storage, and provider layers.
+`opencode-core` defines types and service-facing interfaces that higher crates depend on, without pulling in storage/server/runtime implementation details.
 
-## Purpose
+## Project foundation contracts (new in this stream)
 
-`opencode-core` centralizes the common pieces that should not depend on higher-level runtime crates:
+This crate now includes canonical repository/worktree foundation contracts in `src/project.rs`:
 
-- cascading JSONC config loading
-- typed IDs
-- DTOs shared between storage and HTTP layers
-- provider/account parity DTOs (account state rows, control-account compatibility, account/org response DTOs)
-- workspace error types
-- tracing bootstrap helpers
-- async context helpers and boxed stream aliases
+- `RepositoryProbe` (backend-agnostic inspection seam)
+- `ProjectProbeError`
+- `ProjectFoundationRecord`
+- `WorktreeState`
+- `RepositoryState`
+- `SyncBasis`
 
-## Configuration Behavior
+These contracts are intentionally separate from session runtime naming. `RunSnapshot` remains session-runtime language; repository/worktree persistence uses foundation-specific terms.
 
-`opencode-core` now exposes both low-level config loading and a shared runtime `ConfigService`:
+## Shared DTO boundary
 
-- `Config::load(project_dir)` performs one-shot layered merge (`defaults < global < local < env`).
-- `ConfigService::resolve()` does the same merge with an in-memory cache for runtime reuse.
-- `ConfigService::read_scope(scope)` returns persisted raw config for `local` or `global` scope.
-- `ConfigService::update_scope(scope, payload)` merges and persists only the targeted scope, then invalidates cached resolved config on success.
-- `ConfigService::resolve_bind(cli_overrides)` applies CLI host/port overrides on top of resolved config without affecting non-bind fields.
+`src/dto.rs` exports persistence/transport-neutral rows used across storage and server layers, including `ProjectFoundationRow` for additive repository/worktree state.
 
-Environment support includes keys such as `OPENCODE_MODEL`, `OPENCODE_LOG_LEVEL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `OPENCODE_SERVER_HOST`, `OPENCODE_SERVER_PORT`, and `OPENCODE_AUTH_TOKEN`.
+Design constraints enforced here:
 
-## Why Other Crates Depend On It
+- unknown fields are representable (`Option<_>`)
+- partial state remains serializable and round-trippable
+- no bare persisted `snapshot` terminology in project foundation domain
 
-- `opencode-cli` uses config and tracing bootstrap
-- `opencode-server` uses shared DTOs and typed errors
-- `opencode-storage` uses DTOs and typed IDs for persistence contracts
-- `opencode-provider` uses shared streaming and provider/account-domain DTO contracts
+## Why other crates depend on this
 
-## Provider/Auth/Account parity note
+- `opencode-storage`: maps SQLite rows to/from shared DTOs
+- `opencode-server`: route adapters and foundation probe orchestration
+- `opencode-session`: runtime errors/IDs and strict naming boundary tests
+- `opencode`: startup/bootstrap composition
 
-`opencode-core` now carries the shared account-state DTO boundary used across storage (`opencode-storage`), domain services (`opencode-provider`), and HTTP routes (`opencode-server`).
-This keeps provider/account payloads stable and transport-neutral while preserving legacy `control_account` compatibility.
+## Testing expectations
 
-## Test
+From workspace root:
 
 ```sh
 cargo test -p opencode-core
 ```
 
+Core tests should continue proving:
+
+- serialization of partial/unknown project foundation fields
+- naming boundary invariants between project-foundation state and run-state snapshot terms
+
 ## Notes
 
-This crate should stay low-level. Business workflow code belongs in higher-level crates.
+Keep this crate implementation-light and dependency-light. Domain workflows belong in higher layers.

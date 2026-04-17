@@ -154,9 +154,8 @@ impl PermissionRuntime for InMemoryPermissionRuntime {
                 let mut pending_map = self.pending.lock().await;
                 let same_session_ids: Vec<String> = pending_map
                     .iter()
-                    .filter_map(|(id, item)| {
-                        (item.request.session_id == pending.request.session_id).then(|| id.clone())
-                    })
+                    .filter(|(_, item)| item.request.session_id == pending.request.session_id)
+                    .map(|(id, _)| id.clone())
                     .collect();
                 for id in same_session_ids {
                     if let Some(other) = pending_map.remove(&id) {
@@ -335,10 +334,7 @@ fn wildcard_matches(rule_pattern: &str, requested_pattern: &str) -> bool {
     }
 
     if !rule_pattern.ends_with('*')
-        && let Some(last_segment) = rule_pattern
-            .split('*')
-            .filter(|segment| !segment.is_empty())
-            .next_back()
+        && let Some(last_segment) = rule_pattern.split('*').rfind(|segment| !segment.is_empty())
     {
         return requested_pattern.ends_with(last_segment);
     }
