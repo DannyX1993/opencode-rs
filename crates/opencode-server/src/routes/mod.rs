@@ -7,3 +7,4 @@ pub mod project;
 pub mod provider;
 pub mod question;
 pub mod session;
+pub mod workspace;

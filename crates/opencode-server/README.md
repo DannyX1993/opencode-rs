@@ -6,29 +6,38 @@ Axum HTTP server surface for the Rust workspace.
 
 `opencode-server` exposes project/session/provider/config routes while keeping handlers thin and delegating stateful logic to domain/storage crates.
 
-## Project foundation behavior (this change)
+## Workspace control-plane behavior (this change)
 
-`PUT /api/v1/projects/:id` now performs two writes:
+This crate now includes a control-plane middleware slice for workspace-aware routing.
 
-1. Legacy project upsert (`project` row)
-2. Additive foundation upsert (`project_repository_state` row)
+### Request decision flow
 
-Foundation capture uses a `RepositoryProbe` implementation (`GitCliRepositoryProbe`) and preserves compatibility guarantees:
+1. Classify route via control-plane policy (`Eligible` vs `LocalOnly`).
+2. Resolve selector precedence (`?workspace=` first, `x-opencode-workspace` second).
+3. Load workspace metadata from storage.
+4. Decide local vs forward using instance identity + remote target metadata.
+5. If forwarding, proxy the request with bounded timeout/retry/backoff.
 
-- existing project route response shape remains unchanged
-- non-git worktrees still persist successfully
-- probe failures (git missing/command error) fall back to unknown repository fields
-- known metadata is persisted when available; unknown fields remain `None`
+### Compatibility guarantees
+
+- Existing handlers remain unchanged; middleware only gates execution path.
+- Requests without selector preserve local behavior parity.
+- Local-only policy routes always run in-process.
+- Forwarded HTTP requests preserve method/path/query/body.
+- WebSocket forward path is explicitly deferred (returns `501`).
 
 ## Route surface
 
 See [`src/routes/README.md`](src/routes/README.md) for module-level route responsibilities.
 
+See [`src/control_plane/README.md`](src/control_plane/README.md) for middleware/proxy internals.
+
 ## Boundaries
 
-- No control-plane/workspace-orchestration behavior is introduced here.
-- Foundation metadata is internal persistence for later orchestration readiness, not a new public payload contract.
-- Session runtime root/cwd semantics remain owned by `opencode-session` and validated in integration tests.
+- This crate owns HTTP boundary concerns (routing, middleware, extractor validation, proxying).
+- Storage schema and persistence mapping remain in `opencode-storage`.
+- Session runtime behavior remains in `opencode-session` (control-plane only decides placement).
+- Workspace metadata validation for remote routing is explicit and fails fast on malformed payloads.
 
 ## Test expectations
 
@@ -40,9 +49,10 @@ cargo test -p opencode-server
 
 Server tests should continue validating:
 
-- project upsert/list/get behavior remains stable
-- foundation persistence for git and non-git/unknown scenarios
-- session and runtime route contracts are not changed by enriched project foundation metadata
+- local-only route enforcement remains stable
+- selector precedence and validation errors are deterministic
+- forwarding retries/timeouts map to expected HTTP errors
+- websocket forwarding deferral is explicit and test-covered
 
 Full required workspace gates:
 

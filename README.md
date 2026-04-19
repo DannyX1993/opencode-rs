@@ -6,30 +6,63 @@ Rust workspace for the `opencode` runtime, HTTP server, domain crates, and SQLit
 
 ## Release
 
-- Current workspace release: **`0.12.0`**
-- Tag convention: **`v<semver>`** (for this cycle: `v0.12.0`)
+- Current workspace release: **`0.13.0`**
+- Tag convention: **`v<semver>`** (for this cycle: `v0.13.0`)
 - Crates use `version.workspace = true`, so all Rust packages stay lockstep with `[workspace.package]`.
 
 ## What landed in this change stream
 
-`port-project-git-snapshot-worktree-foundations` adds a durable **project repository foundation** layer while preserving existing runtime behavior.
+`port-project-workspace-control-plane` adds a first control-plane slice for workspace-aware routing with safe rollback controls.
 
 ### Design intent
 
-1. Keep runtime contract unchanged:
-   - tool/runtime `root` continues to use `project.worktree`
-   - runtime `cwd` continues to use `session.directory`
-2. Persist canonical repository/worktree metadata in an additive seam.
-3. Keep naming boundaries clear:
-   - repository/worktree state uses `worktree_state`, `repository_state`, `sync_basis`
-   - `RunSnapshot` remains session-runtime terminology only.
+1. Keep existing local API/runtime behavior unchanged when no workspace selector is provided.
+2. Enable selector-based local-vs-remote routing for eligible session endpoints.
+3. Preserve operational safety with explicit rollback and bounded forwarding policy.
+4. Keep WebSocket parity explicit: forwarding is intentionally deferred in this release.
 
-### New foundation behavior
+### Control-plane behavior (v0.13.0)
 
-- Project upsert flow (`PUT /api/v1/projects/:id`) now probes the worktree and persists companion foundation data.
-- Persistence lives in additive table `project_repository_state` (migration `0002_project_repository_foundation.sql`).
-- If repository metadata is not available (non-git path, git command unavailable, partial probe), persistence still succeeds with unknown fields (`None`) rather than invented values.
-- Existing `/api/v1/projects` response shape remains unchanged (foundation fields are internal persistence/state data, not newly exposed API payloads).
+- New selector resolution precedence for eligible routes:
+  - `?workspace=<id>` query first
+  - `x-opencode-workspace` header second
+- Route policy enforces which paths are eligible for forwarding. Non-eligible routes stay local.
+- Workspace metadata (`type=remote`, `extra.instance`, `extra.base_url`) drives remote target resolution.
+- Requests targeting a remote instance are proxied preserving method/path/query/body, with hop-by-hop header stripping.
+- Forwarding uses bounded timeout/retry/backoff policy for resilient cloud-native operation.
+- WebSocket upgrade forwarding returns explicit deferral (`501 Not Implemented`) in this slice.
+
+### Rollback / rollout notes
+
+- Emergency rollback switch: `force_local_only=true` keeps all traffic local without changing route handlers.
+- Safe rollout strategy:
+  1. deploy with local-only enabled,
+  2. verify observability/log signals,
+  3. disable local-only progressively per environment.
+
+### Manual usage hints
+
+- Local handling (default parity):
+
+```http
+GET /api/v1/sessions/<sid>
+```
+
+- Explicit remote targeting by query:
+
+```http
+POST /api/v1/sessions/<sid>/prompt?workspace=<workspace-id>
+```
+
+- Explicit remote targeting by header:
+
+```http
+x-opencode-workspace: <workspace-id>
+```
+
+- Remote workspace metadata must include:
+  - `instance`: destination control-plane instance id
+  - `base_url`: absolute `http(s)` base URL
 
 ## Workspace architecture (high level)
 
@@ -48,20 +81,18 @@ opencode-core provides shared DTOs/config/errors/IDs across all crates.
 
 ## Key boundaries
 
-- `opencode-core`: shared domain contracts (including project-foundation structs/traits).
-- `opencode-storage`: additive persistence seam (`project_repository_state`) + storage trait methods.
-- `opencode-server`: thin route adapters; project route orchestrates probe + persistence.
-- `opencode-session`: runtime engine and run-state semantics; unchanged root/cwd contract guarded by tests.
+- `opencode-core`: shared IDs/DTOs used by server + storage layers.
+- `opencode-storage`: workspace persistence (`workspace` rows, metadata blobs) consumed by control-plane resolution.
+- `opencode-server`: control-plane middleware, route policy, selector resolver, and HTTP proxy forwarding.
+- `opencode-session`: session runtime semantics remain unchanged; control-plane only decides where requests execute.
 
-## Git/non-git fallback policy
+## Compatibility policy
 
-Foundation persistence is intentionally additive and tolerant:
-
-- **Git available + repo detected** → persist canonical worktree + repository metadata.
-- **Git unavailable / command error / non-git path** → persist canonical worktree (when resolvable) with unknown repo fields.
-- **Partial inspectability** → persist known fields, leave unknown fields as `None`.
-
-This enables later enrichment without blocking current project/session workflows.
+- No selector provided on eligible route → request stays local.
+- Selector present but route is local-only by policy → request stays local.
+- Selector present + remote target resolved + same instance id → request stays local.
+- Selector present + remote target resolved + different instance id → request is forwarded.
+- WebSocket upgrade + forward decision → explicit deferral (`501`) rather than silent downgrade.
 
 ## Validation gates (required)
 
@@ -89,6 +120,7 @@ See [`crates/README.md`](crates/README.md) for crate index and statuses.
 - [`crates/opencode-core/README.md`](crates/opencode-core/README.md)
 - [`crates/opencode-storage/README.md`](crates/opencode-storage/README.md)
 - [`crates/opencode-server/README.md`](crates/opencode-server/README.md)
+- [`crates/opencode-server/src/control_plane/README.md`](crates/opencode-server/src/control_plane/README.md)
 - [`crates/opencode-server/src/routes/README.md`](crates/opencode-server/src/routes/README.md)
 - [`crates/opencode-session/README.md`](crates/opencode-session/README.md)
 - [`opencode/README.md`](opencode/README.md)

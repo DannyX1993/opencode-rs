@@ -1,4 +1,9 @@
 //! `/api/v1/projects/:pid/sessions` and `/api/v1/sessions/:sid` route handlers.
+//!
+//! Control-plane routing is intentionally handled *before* these handlers by
+//! middleware in `crate::control_plane`. That keeps session handlers focused on
+//! local storage/runtime semantics and guarantees selector-free requests retain
+//! legacy local behavior.
 
 use axum::{
     Json,
@@ -393,6 +398,9 @@ pub(crate) async fn append_message(
 }
 
 /// `POST /api/v1/sessions/:sid/prompt` — start a prompt turn for a session.
+///
+/// Remote-forwarding decisions are made by control-plane middleware; reaching
+/// this handler means the request was classified local (or had no selector).
 pub(crate) async fn prompt(
     State(s): State<AppState>,
     Path(sid): Path<SessionId>,
@@ -853,6 +861,11 @@ mod tests {
             provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
+            control_plane: crate::state::ControlPlaneConfig::default(),
+            control_plane_proxy: Arc::new(crate::control_plane::proxy::HttpProxyService::new(
+                reqwest::Client::new(),
+                crate::state::ProxyPolicy::default(),
+            )),
             harness: false,
         };
         crate::router::build(state)
@@ -892,6 +905,11 @@ mod tests {
             provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
+            control_plane: crate::state::ControlPlaneConfig::default(),
+            control_plane_proxy: Arc::new(crate::control_plane::proxy::HttpProxyService::new(
+                reqwest::Client::new(),
+                crate::state::ProxyPolicy::default(),
+            )),
             harness: false,
         };
         crate::router::build(state)

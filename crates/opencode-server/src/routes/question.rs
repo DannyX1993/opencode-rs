@@ -259,6 +259,11 @@ mod tests {
             provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
+            control_plane: crate::state::ControlPlaneConfig::default(),
+            control_plane_proxy: Arc::new(crate::control_plane::proxy::HttpProxyService::new(
+                reqwest::Client::new(),
+                crate::state::ProxyPolicy::default(),
+            )),
             harness: false,
         };
 

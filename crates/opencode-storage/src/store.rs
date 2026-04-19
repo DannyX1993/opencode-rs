@@ -4,16 +4,18 @@ use async_trait::async_trait;
 use opencode_core::{
     dto::{
         AccountRow, AccountStateRow, ControlAccountRow, MessageRow, MessageWithParts, PartRow,
-        PermissionRow, ProjectFoundationRow, ProjectRow, SessionRow, TodoRow,
+        PermissionRow, ProjectFoundationRow, ProjectRow, SessionRow, TodoRow, WorkspaceRow,
     },
     error::StorageError,
-    id::{AccountId, ProjectId, SessionId},
+    id::{AccountId, ProjectId, SessionId, WorkspaceId},
 };
 use sqlx::SqlitePool;
 
 use crate::{
     event_store::SyncEventStore,
-    repo::{account, message, permission, project, project_repository_state, session, todo},
+    repo::{
+        account, message, permission, project, project_repository_state, session, todo, workspace,
+    },
 };
 
 /// Unified storage facade used by session and server layers.
@@ -48,6 +50,32 @@ pub trait Storage: Send + Sync {
         _row: ProjectFoundationRow,
     ) -> Result<(), StorageError> {
         Ok(())
+    }
+
+    // ── Workspaces ───────────────────────────────────────────────────────────
+    /// Insert or update a workspace row.
+    async fn upsert_workspace(&self, _row: WorkspaceRow) -> Result<(), StorageError> {
+        Err(StorageError::Db(
+            "workspace APIs not implemented for this storage backend".into(),
+        ))
+    }
+    /// Fetch a workspace by id.
+    async fn get_workspace(&self, _id: WorkspaceId) -> Result<Option<WorkspaceRow>, StorageError> {
+        Err(StorageError::Db(
+            "workspace APIs not implemented for this storage backend".into(),
+        ))
+    }
+    /// List all workspaces.
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceRow>, StorageError> {
+        Err(StorageError::Db(
+            "workspace APIs not implemented for this storage backend".into(),
+        ))
+    }
+    /// Delete a workspace by id.
+    async fn delete_workspace(&self, _id: WorkspaceId) -> Result<(), StorageError> {
+        Err(StorageError::Db(
+            "workspace APIs not implemented for this storage backend".into(),
+        ))
     }
 
     // ── Sessions ─────────────────────────────────────────────────────────────
@@ -180,6 +208,19 @@ impl Storage for StorageImpl {
         project_repository_state::upsert(&self.pool, &row).await
     }
 
+    async fn upsert_workspace(&self, row: WorkspaceRow) -> Result<(), StorageError> {
+        workspace::upsert(&self.pool, &row).await
+    }
+    async fn get_workspace(&self, id: WorkspaceId) -> Result<Option<WorkspaceRow>, StorageError> {
+        workspace::get(&self.pool, id).await
+    }
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceRow>, StorageError> {
+        workspace::list(&self.pool).await
+    }
+    async fn delete_workspace(&self, id: WorkspaceId) -> Result<(), StorageError> {
+        workspace::delete(&self.pool, id).await
+    }
+
     async fn create_session(&self, row: SessionRow) -> Result<(), StorageError> {
         session::create(&self.pool, &row).await
     }
@@ -300,8 +341,8 @@ mod tests {
     use super::*;
     use crate::pool::connect;
     use opencode_core::{
-        dto::AccountStateRow,
-        id::{AccountId, MessageId, PartId, ProjectId, SessionId},
+        dto::{AccountStateRow, WorkspaceRow},
+        id::{AccountId, MessageId, PartId, ProjectId, SessionId, WorkspaceId},
         project::{RepositoryState, WorktreeState},
     };
     use serde_json::json;
@@ -354,6 +395,18 @@ mod tests {
         }
     }
 
+    fn workspace(pid: ProjectId) -> WorkspaceRow {
+        WorkspaceRow {
+            id: WorkspaceId::new(),
+            r#type: "remote".into(),
+            branch: Some("main".into()),
+            name: Some("alpha".into()),
+            directory: Some("/tmp/alpha".into()),
+            extra: Some(json!({"instance": "cp-a", "base_url": "https://cp-a.example"})),
+            project_id: pid,
+        }
+    }
+
     fn msg(mid: MessageId, sid: SessionId) -> MessageRow {
         MessageRow {
             id: mid,
@@ -398,6 +451,32 @@ mod tests {
 
         let all = s.list_projects().await.unwrap();
         assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn storage_impl_delegates_workspace_crud() {
+        let (s, _f) = make_storage().await;
+        let pid = ProjectId::new();
+        s.upsert_project(proj(pid)).await.unwrap();
+
+        let mut row = workspace(pid);
+        s.upsert_workspace(row.clone()).await.unwrap();
+
+        let fetched = s.get_workspace(row.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, row.id);
+        assert_eq!(fetched.project_id, pid);
+
+        row.name = Some("beta".into());
+        s.upsert_workspace(row.clone()).await.unwrap();
+        let fetched_updated = s.get_workspace(row.id).await.unwrap().unwrap();
+        assert_eq!(fetched_updated.name.as_deref(), Some("beta"));
+
+        let all = s.list_workspaces().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, row.id);
+
+        s.delete_workspace(row.id).await.unwrap();
+        assert!(s.get_workspace(row.id).await.unwrap().is_none());
     }
 
     // ── Task 1.3 / 1.4: session CRUD (RED → GREEN) ───────────────────────────

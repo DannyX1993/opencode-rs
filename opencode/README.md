@@ -4,7 +4,7 @@ Binary crate for the Rust `opencode` executable.
 
 ## Release
 
-- Current binary/workspace version: **`0.12.0`**
+- Current binary/workspace version: **`0.13.0`**
 
 ## Purpose
 
@@ -34,13 +34,14 @@ Server startup wires:
 
 Bind precedence remains: **CLI args > resolved config > defaults**.
 
-## Foundation/worktree compatibility expectations
+## Control-plane compatibility expectations
 
-Although project repository foundation persistence is initiated in server routes, startup/runtime behavior here remains compatible:
+Although workspace control-plane routing is initiated in server middleware, startup/runtime behavior here remains compatible:
 
 - no new control-plane dependency required
-- no startup failure when project foundation metadata is partial/unknown
-- runtime prompt/session behavior remains unchanged by additive foundation state
+- no startup failure when workspace metadata is absent for local-only flows
+- runtime prompt/session behavior remains unchanged by control-plane routing enablement
+- rollback remains available via control-plane `force_local_only` config
 
 ## Testing
 

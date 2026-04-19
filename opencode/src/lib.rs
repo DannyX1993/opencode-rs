@@ -6,7 +6,9 @@
 use anyhow::Result;
 use opencode_cli::cli::{Cli, Command};
 use opencode_core::config_service::{ConfigService, ServerBindOverrides};
-use std::path::Path;
+use opencode_server::control_plane::proxy::HttpProxyService;
+use opencode_server::state::{ControlPlaneConfig, ProxyPolicy};
+use std::{path::Path, time::Duration};
 
 /// Dispatch the parsed CLI command, given the already-bootstrapped config.
 ///
@@ -130,6 +132,11 @@ pub async fn start_server(cwd: &Path, cli_bind: ServerBindOverrides) -> Result<(
     let provider_catalog_models = Arc::new(models);
     let provider_auth = Arc::new(ProviderAuthService::new());
     let provider_accounts = Arc::new(AccountService::new(Arc::clone(&storage)));
+    let control_plane = resolve_control_plane_config();
+    let control_plane_proxy = Arc::new(HttpProxyService::new(
+        reqwest::Client::new(),
+        control_plane.proxy.clone(),
+    ));
 
     let state = AppState {
         config_service: Arc::clone(&config_service),
@@ -143,6 +150,8 @@ pub async fn start_server(cwd: &Path, cli_bind: ServerBindOverrides) -> Result<(
         provider_catalog_models,
         provider_auth,
         provider_accounts,
+        control_plane,
+        control_plane_proxy,
         harness,
     };
 
@@ -153,6 +162,42 @@ pub async fn start_server(cwd: &Path, cli_bind: ServerBindOverrides) -> Result<(
     tracing::info!(%addr, "opencode server listening");
     serve(router, addr).await?;
     Ok(())
+}
+
+fn resolve_control_plane_config() -> ControlPlaneConfig {
+    let defaults = ControlPlaneConfig::default();
+    let instance_id = std::env::var("OPENCODE_CONTROL_PLANE_INSTANCE_ID")
+        .unwrap_or_else(|_| defaults.instance_id.clone());
+    let force_local_only =
+        env_bool("OPENCODE_CONTROL_PLANE_LOCAL_ONLY").unwrap_or(defaults.force_local_only);
+    let timeout = env_u64("OPENCODE_CONTROL_PLANE_PROXY_TIMEOUT_MS")
+        .map(Duration::from_millis)
+        .unwrap_or(defaults.proxy.timeout);
+    let max_retries = env_u64("OPENCODE_CONTROL_PLANE_PROXY_RETRIES")
+        .map_or(defaults.proxy.max_retries, |value| value as u32);
+    let backoff = env_u64("OPENCODE_CONTROL_PLANE_PROXY_BACKOFF_MS")
+        .map(Duration::from_millis)
+        .unwrap_or(defaults.proxy.backoff);
+
+    ControlPlaneConfig::new(
+        instance_id,
+        force_local_only,
+        ProxyPolicy::bounded(timeout, max_retries, backoff),
+    )
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -251,7 +296,7 @@ mod tests {
 
     #[test]
     fn package_version_matches_next_minor_release() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.12.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.13.0");
     }
 
     // RED S.1 — `server` subcommand binds a real TCP socket and serves health
@@ -646,5 +691,52 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not") || err.to_string().contains("no_such_tool"));
+    }
+
+    #[test]
+    fn start_server_control_plane_config_defaults_when_env_missing() {
+        // SAFETY: isolated test-scoped env cleanup.
+        unsafe {
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_INSTANCE_ID");
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_LOCAL_ONLY");
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_PROXY_TIMEOUT_MS");
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_PROXY_RETRIES");
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_PROXY_BACKOFF_MS");
+        }
+
+        let cfg = resolve_control_plane_config();
+        assert_eq!(cfg.instance_id, "local");
+        assert!(!cfg.force_local_only);
+        assert_eq!(cfg.proxy.timeout, Duration::from_secs(5));
+        assert_eq!(cfg.proxy.max_retries, 2);
+        assert_eq!(cfg.proxy.backoff, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn start_server_control_plane_config_reads_and_bounds_env_overrides() {
+        // SAFETY: isolated test-scoped env setup/cleanup.
+        unsafe {
+            std::env::set_var("OPENCODE_CONTROL_PLANE_INSTANCE_ID", "cp-a");
+            std::env::set_var("OPENCODE_CONTROL_PLANE_LOCAL_ONLY", "true");
+            std::env::set_var("OPENCODE_CONTROL_PLANE_PROXY_TIMEOUT_MS", "10");
+            std::env::set_var("OPENCODE_CONTROL_PLANE_PROXY_RETRIES", "77");
+            std::env::set_var("OPENCODE_CONTROL_PLANE_PROXY_BACKOFF_MS", "1");
+        }
+
+        let cfg = resolve_control_plane_config();
+        assert_eq!(cfg.instance_id, "cp-a");
+        assert!(cfg.force_local_only);
+        assert_eq!(cfg.proxy.timeout, Duration::from_millis(100));
+        assert_eq!(cfg.proxy.max_retries, 5);
+        assert_eq!(cfg.proxy.backoff, Duration::from_millis(10));
+
+        // SAFETY: cleanup for process-global env vars used above.
+        unsafe {
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_INSTANCE_ID");
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_LOCAL_ONLY");
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_PROXY_TIMEOUT_MS");
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_PROXY_RETRIES");
+            std::env::remove_var("OPENCODE_CONTROL_PLANE_PROXY_BACKOFF_MS");
+        }
     }
 }

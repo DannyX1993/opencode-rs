@@ -1,12 +1,13 @@
 //! Axum router factory.
 
-use axum::{Json, Router, routing::get, routing::post};
+use axum::{Json, Router, middleware::from_fn_with_state, routing::get, routing::post};
 use serde_json::json;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 use crate::{
-    routes::{config, event, permission, project, provider, question, session},
+    control_plane,
+    routes::{config, event, permission, project, provider, question, session, workspace},
     state::AppState,
 };
 use opencode_core::error::ServerError;
@@ -70,6 +71,13 @@ pub fn build(state: AppState) -> Router {
             "/global/config",
             get(config::get_global).patch(config::patch_global),
         )
+        .route("/workspaces", get(workspace::list).post(workspace::create))
+        .route(
+            "/workspaces/{id}",
+            get(workspace::get)
+                .patch(workspace::patch)
+                .delete(workspace::delete),
+        )
         .route("/config/providers", get(config::providers))
         .route("/event", get(event::stream))
         // Manual provider harness (Phase 2 — env-gated)
@@ -78,6 +86,9 @@ pub fn build(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .nest("/api/v1", api)
+        // Control-plane sits in front of eligible API routes and either
+        // forwards or allows local handlers to run unchanged.
+        .layer(from_fn_with_state(state.clone(), control_plane::middleware))
         .with_state(state)
 }
 
@@ -118,17 +129,17 @@ mod tests {
     use opencode_core::{
         dto::{
             AccountRow, AccountStateRow, ControlAccountRow, MessageRow, MessageWithParts, PartRow,
-            PermissionRow, ProjectRow, SessionRow, TodoRow,
+            PermissionRow, ProjectRow, SessionRow, TodoRow, WorkspaceRow,
         },
         error::{SessionError, StorageError},
-        id::{AccountId, ProjectId, SessionId},
+        id::{AccountId, ProjectId, SessionId, WorkspaceId},
     };
     use opencode_provider::{AccountService, ModelRegistry, ProviderAuthService};
     use opencode_session::engine::Session;
     use opencode_session::types::{
         DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus,
     };
-    use opencode_storage::Storage;
+    use opencode_storage::{Storage, StorageImpl, connect};
     use std::io::Write;
     use std::sync::Arc;
     use tokio::sync::Notify;
@@ -298,6 +309,46 @@ mod tests {
             provider_catalog_models: Arc::new(Vec::new()),
             provider_auth: Arc::new(ProviderAuthService::new()),
             provider_accounts: Arc::new(AccountService::new(storage)),
+            control_plane: crate::state::ControlPlaneConfig::default(),
+            control_plane_proxy: Arc::new(crate::control_plane::proxy::HttpProxyService::new(
+                reqwest::Client::new(),
+                crate::state::ProxyPolicy::default(),
+            )),
+            harness: false,
+        }
+    }
+
+    fn state_with_storage_and_control_plane(
+        storage: Arc<dyn Storage>,
+        control_plane: crate::state::ControlPlaneConfig,
+    ) -> AppState {
+        let config_service =
+            ConfigService::with_cached_resolved(std::env::temp_dir(), None, Config::default());
+        let bus = Arc::new(BroadcastBus::new(64));
+        AppState {
+            config_service: Arc::new(config_service),
+            bus: Arc::clone(&bus),
+            event_heartbeat: crate::state::EventHeartbeat::default(),
+            storage: Arc::clone(&storage),
+            session: Arc::new(StubSession),
+            permission_runtime: Arc::new(
+                opencode_session::permission_runtime::InMemoryPermissionRuntime::new(
+                    Arc::clone(&storage),
+                    Arc::clone(&bus),
+                ),
+            ),
+            question_runtime: Arc::new(
+                opencode_session::question_runtime::InMemoryQuestionRuntime::new(Arc::clone(&bus)),
+            ),
+            registry: Arc::new(ModelRegistry::new()),
+            provider_catalog_models: Arc::new(Vec::new()),
+            provider_auth: Arc::new(ProviderAuthService::new()),
+            provider_accounts: Arc::new(AccountService::new(storage)),
+            control_plane,
+            control_plane_proxy: Arc::new(crate::control_plane::proxy::HttpProxyService::new(
+                reqwest::Client::new(),
+                crate::state::ProxyPolicy::default(),
+            )),
             harness: false,
         }
     }
@@ -361,6 +412,489 @@ mod tests {
         let req = Request::builder().uri("/nope").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn workspace_collection_route_is_registered_under_api_namespace() {
+        let app = build(state());
+        let req = Request::builder()
+            .uri("/api/v1/workspaces")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn workspace_item_route_rejects_unsupported_methods() {
+        let app = build(state());
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/v1/workspaces/{}",
+                opencode_core::id::WorkspaceId::new()
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn workspace_crud_persists_via_temp_sqlite_with_full_router() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let pool = connect(file.path()).await.unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(StorageImpl::new(pool));
+        let project_id = ProjectId::new();
+        storage
+            .upsert_project(ProjectRow {
+                id: project_id,
+                worktree: "/tmp/project".into(),
+                vcs: Some("git".into()),
+                name: Some("project".into()),
+                icon_url: None,
+                icon_color: None,
+                time_created: 1,
+                time_updated: 1,
+                time_initialized: None,
+                sandboxes: serde_json::json!([]),
+                commands: None,
+            })
+            .await
+            .unwrap();
+
+        let app = build(state_with_storage_and_control_plane(
+            Arc::clone(&storage),
+            crate::state::ControlPlaneConfig::new(
+                "cp-local".into(),
+                false,
+                crate::state::ProxyPolicy::default(),
+            ),
+        ));
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "type": "remote",
+                            "project_id": project_id,
+                            "name": "alpha",
+                            "extra": {
+                                "instance": "cp-remote",
+                                "base_url": "https://cp-remote.example"
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created_body = axum::body::to_bytes(created.into_body(), 8192)
+            .await
+            .unwrap();
+        let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+        let created_id = created_json["id"].as_str().unwrap().to_string();
+
+        let fetched = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{created_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+
+        // Reopen the same SQLite file through a fresh storage + router instance to
+        // verify persistence through the API boundary, not only in-memory state.
+        let reopened_pool = connect(file.path()).await.unwrap();
+        let reopened_storage: Arc<dyn Storage> = Arc::new(StorageImpl::new(reopened_pool));
+        let reopened = build(state_with_storage_and_control_plane(
+            Arc::clone(&reopened_storage),
+            crate::state::ControlPlaneConfig::new(
+                "cp-local".into(),
+                false,
+                crate::state::ProxyPolicy::default(),
+            ),
+        ));
+
+        let persisted = reopened
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{created_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(persisted.status(), StatusCode::OK);
+
+        let deleted = reopened
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{created_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::OK);
+
+        let missing = reopened
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{created_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn session_get_with_remote_selector_is_forwarded_by_control_plane() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param},
+        };
+
+        let upstream = MockServer::start().await;
+        let sid = SessionId::new();
+        let workspace_id = WorkspaceId::new();
+
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/sessions/{sid}")))
+            .and(query_param("workspace", workspace_id.to_string()))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(serde_json::json!({"proxied": true})),
+            )
+            .mount(&upstream)
+            .await;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let pool = connect(file.path()).await.unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(StorageImpl::new(pool));
+        let project_id = ProjectId::new();
+        storage
+            .upsert_project(ProjectRow {
+                id: project_id,
+                worktree: "/tmp/project".into(),
+                vcs: Some("git".into()),
+                name: Some("project".into()),
+                icon_url: None,
+                icon_color: None,
+                time_created: 1,
+                time_updated: 1,
+                time_initialized: None,
+                sandboxes: serde_json::json!([]),
+                commands: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .upsert_workspace(WorkspaceRow {
+                id: workspace_id,
+                r#type: "remote".into(),
+                branch: None,
+                name: Some("remote".into()),
+                directory: None,
+                extra: Some(serde_json::json!({
+                    "instance": "cp-remote",
+                    "base_url": upstream.uri(),
+                })),
+                project_id,
+            })
+            .await
+            .unwrap();
+
+        let app = build(state_with_storage_and_control_plane(
+            storage,
+            crate::state::ControlPlaneConfig::new(
+                "cp-local".into(),
+                false,
+                crate::state::ProxyPolicy::default(),
+            ),
+        ));
+        let req = Request::builder()
+            .uri(format!("/api/v1/sessions/{sid}?workspace={workspace_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        let received = upstream.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1, "request should be forwarded upstream");
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["proxied"], true);
+    }
+
+    #[tokio::test]
+    async fn session_get_without_selector_keeps_existing_local_behavior() {
+        use wiremock::{MockServer, matchers::method};
+
+        let upstream = MockServer::start().await;
+        let sid = SessionId::new();
+
+        // Guard rail: no forwarding should happen when selector is absent.
+        wiremock::Mock::given(method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let pool = connect(file.path()).await.unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(StorageImpl::new(pool));
+        let app = build(state_with_storage_and_control_plane(
+            storage,
+            crate::state::ControlPlaneConfig::new(
+                "cp-local".into(),
+                false,
+                crate::state::ProxyPolicy::default(),
+            ),
+        ));
+
+        let req = Request::builder()
+            .uri(format!("/api/v1/sessions/{sid}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let received = upstream.received_requests().await.unwrap();
+        assert!(
+            received.is_empty(),
+            "selector-free requests must stay local"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_forwarding_returns_not_implemented() {
+        let sid = SessionId::new();
+        let workspace_id = WorkspaceId::new();
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let pool = connect(file.path()).await.unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(StorageImpl::new(pool));
+        let project_id = ProjectId::new();
+        storage
+            .upsert_project(ProjectRow {
+                id: project_id,
+                worktree: "/tmp/project".into(),
+                vcs: Some("git".into()),
+                name: Some("project".into()),
+                icon_url: None,
+                icon_color: None,
+                time_created: 1,
+                time_updated: 1,
+                time_initialized: None,
+                sandboxes: serde_json::json!([]),
+                commands: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .upsert_workspace(WorkspaceRow {
+                id: workspace_id,
+                r#type: "remote".into(),
+                branch: None,
+                name: Some("remote".into()),
+                directory: None,
+                extra: Some(serde_json::json!({
+                    "instance": "cp-remote",
+                    "base_url": "https://remote.example",
+                })),
+                project_id,
+            })
+            .await
+            .unwrap();
+
+        let app = build(state_with_storage_and_control_plane(
+            storage,
+            crate::state::ControlPlaneConfig::new(
+                "cp-local".into(),
+                false,
+                crate::state::ProxyPolicy::default(),
+            ),
+        ));
+
+        let req = Request::builder()
+            .uri(format!("/api/v1/sessions/{sid}?workspace={workspace_id}"))
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn rollout_rollback_force_local_switch_prevents_remote_forwarding() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+
+        let sid = SessionId::new();
+        let workspace_id = WorkspaceId::new();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let pool = connect(file.path()).await.unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(StorageImpl::new(pool));
+        let project_id = ProjectId::new();
+        storage
+            .upsert_project(ProjectRow {
+                id: project_id,
+                worktree: "/tmp/project".into(),
+                vcs: Some("git".into()),
+                name: Some("project".into()),
+                icon_url: None,
+                icon_color: None,
+                time_created: 1,
+                time_updated: 1,
+                time_initialized: None,
+                sandboxes: serde_json::json!([]),
+                commands: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .upsert_workspace(WorkspaceRow {
+                id: workspace_id,
+                r#type: "remote".into(),
+                branch: None,
+                name: Some("remote".into()),
+                directory: None,
+                extra: Some(serde_json::json!({
+                    "instance": "cp-remote",
+                    "base_url": upstream.uri(),
+                })),
+                project_id,
+            })
+            .await
+            .unwrap();
+
+        // Rollback mode forces all selector-bearing requests to remain local,
+        // even when workspace metadata points at another instance.
+        let app = build(state_with_storage_and_control_plane(
+            storage,
+            crate::state::ControlPlaneConfig::new(
+                "cp-local".into(),
+                true,
+                crate::state::ProxyPolicy::default(),
+            ),
+        ));
+
+        let req = Request::builder()
+            .uri(format!("/api/v1/sessions/{sid}?workspace={workspace_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let forwarded = upstream.received_requests().await.unwrap();
+        assert!(
+            forwarded.is_empty(),
+            "force-local rollback must suppress remote forwarding"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_forwarding_returns_parity_501_error_payload() {
+        let sid = SessionId::new();
+        let workspace_id = WorkspaceId::new();
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let pool = connect(file.path()).await.unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(StorageImpl::new(pool));
+        let project_id = ProjectId::new();
+        storage
+            .upsert_project(ProjectRow {
+                id: project_id,
+                worktree: "/tmp/project".into(),
+                vcs: Some("git".into()),
+                name: Some("project".into()),
+                icon_url: None,
+                icon_color: None,
+                time_created: 1,
+                time_updated: 1,
+                time_initialized: None,
+                sandboxes: serde_json::json!([]),
+                commands: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .upsert_workspace(WorkspaceRow {
+                id: workspace_id,
+                r#type: "remote".into(),
+                branch: None,
+                name: Some("remote".into()),
+                directory: None,
+                extra: Some(serde_json::json!({
+                    "instance": "cp-remote",
+                    "base_url": "https://remote.example",
+                })),
+                project_id,
+            })
+            .await
+            .unwrap();
+
+        let app = build(state_with_storage_and_control_plane(
+            storage,
+            crate::state::ControlPlaneConfig::new(
+                "cp-local".into(),
+                false,
+                crate::state::ProxyPolicy::default(),
+            ),
+        ));
+
+        let req = Request::builder()
+            .uri(format!("/api/v1/sessions/{sid}?workspace={workspace_id}"))
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["error"]["code"],
+            serde_json::Value::String("websocket_forwarding_deferred".into())
+        );
+    }
+
+    #[test]
+    fn control_plane_selector_module_exposes_query_first_resolution() {
+        let uri: axum::http::Uri = "/api/v1/sessions/abc?workspace=query-wins".parse().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-opencode-workspace",
+            axum::http::HeaderValue::from_static("header-fallback"),
+        );
+
+        let selector = crate::control_plane::resolver::resolve_selector(&uri, &headers)
+            .expect("selector resolution should succeed")
+            .expect("query selector should be found");
+        assert_eq!(selector.raw, "query-wins");
     }
 
     #[tokio::test]

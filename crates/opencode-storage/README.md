@@ -6,38 +6,31 @@ SQLite-backed persistence boundary for the Rust workspace.
 
 `opencode-storage` owns migrations, repository mappers, and the `Storage` trait used by server/session/provider runtime layers.
 
-## Project repository foundation seam
+## Workspace persistence used by control-plane
 
-This change adds an additive companion persistence seam for canonical repository/worktree state.
+This change extends workspace persistence to support control-plane routing decisions.
 
-### Schema
+### Workspace repository
 
-- New migration: `migrations/0002_project_repository_foundation.sql`
-- New table: `project_repository_state`
-- Keyed by `project_id`
-- Keeps existing `project` table/API usage stable
+- `repo/workspace.rs` now provides full CRUD over the `workspace` table.
+- `extra` metadata is serialized/deserialized as JSON (`Option<serde_json::Value>`).
+- `type=remote` payload validation is enforced in `opencode-server` before writes.
 
-### Storage trait additions
+### Why this matters for routing
 
-- `get_project_foundation(project_id)`
-- `upsert_project_foundation(row)`
+Control-plane resolution in `opencode-server` reads workspace rows and expects stable metadata:
 
-Both methods are additive and do not alter legacy project CRUD behavior.
+- workspace id (`WorkspaceId`) is the selector target
+- remote instance identity from `extra.instance`
+- remote base URL from `extra.base_url`
 
-### Repository behavior
-
-`repo/project_repository_state.rs` maps nullable canonical/repository/vcs/sync fields and JSON state payloads.
-
-Fallback semantics are deliberate:
-
-- missing JSON columns deserialize to defaults when appropriate
-- missing optional JSON payloads remain `None`
-- partial state persists without fabrication
+Storage does not infer or fabricate these values; it only persists/retrieves canonical payloads.
 
 ## Boundaries
 
-- This crate persists data; it does not execute git probing logic.
-- Probing happens at route/domain layer (`opencode-server`), then writes normalized rows through this seam.
+- This crate persists data; it does not run route policy, selector precedence, or proxy logic.
+- Control-plane decisioning and HTTP forwarding live in `opencode-server`.
+- This crate guarantees consistent row/JSON mapping so routing logic sees deterministic metadata.
 
 ## Testing expectations
 
@@ -49,9 +42,9 @@ cargo test -p opencode-storage
 
 Tests should keep covering:
 
-- upgrade from `0001_initial.sql` to include foundation table
-- round-trip CRUD for full and partial foundation rows
-- `None`-heavy/non-git-compatible payload persistence
+- workspace CRUD round-trip (create/get/list/delete)
+- upsert updates for mutable fields
+- JSON `extra` encode/decode (including invalid JSON failure mapping)
 
 For full gate validation, run workspace checks from root:
 
