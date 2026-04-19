@@ -7,7 +7,7 @@ Rust workspace for the `opencode` runtime, HTTP server, domain crates, and SQLit
 ## Release
 
 - Current workspace release: **`0.13.0`**
-- Tag convention: **`v<semver>`** (for this cycle: `v0.13.0`)
+- Tag convention for published git releases in this repo: **`<semver>`** (for this cycle: `0.13.0`)
 - Crates use `version.workspace = true`, so all Rust packages stay lockstep with `[workspace.package]`.
 
 ## What landed in this change stream
