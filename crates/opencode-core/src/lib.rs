@@ -22,6 +22,40 @@ pub mod id;
 pub mod project;
 pub mod tracing;
 
+#[cfg(test)]
+#[allow(unsafe_code)]
+pub(crate) mod test_env {
+    use std::sync::OnceLock;
+    use tokio::sync::{Mutex, MutexGuard};
+
+    const TEST_ENV_KEYS: [&str; 8] = [
+        "OPENCODE_MODEL",
+        "OPENCODE_LOG_LEVEL",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENCODE_SERVER_PORT",
+        "OPENCODE_SERVER_HOST",
+        "OPENCODE_AUTH_TOKEN",
+    ];
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    pub(crate) async fn lock() -> MutexGuard<'static, ()> {
+        env_lock().lock().await
+    }
+
+    pub(crate) fn clear() {
+        for key in TEST_ENV_KEYS {
+            // SAFETY: test-only environment setup/teardown for deterministic config loading.
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+}
+
 /// Convenience re-export of the most commonly used items.
 pub mod prelude {
     pub use crate::{

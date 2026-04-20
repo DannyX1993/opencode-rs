@@ -4,7 +4,7 @@ Binary crate for the Rust `opencode` executable.
 
 ## Release
 
-- Current binary/workspace version: **`0.13.0`**
+- Current binary/workspace version: **`0.14.0`**
 
 ## Purpose
 
@@ -14,13 +14,23 @@ Binary crate for the Rust `opencode` executable.
 
 | Command | Status | Behavior |
 | --- | --- | --- |
-| default / `run` | stub | logs non-implemented TUI mode |
-| `server [--host <h>] [--port <n>]` | active | starts HTTP server + SQLite (`./opencode.db`) |
-| `prompt <text>` | stub | parsed but not implemented as one-shot CLI flow |
+| default / `run` | partial | no args: logs TUI stub; with `<text...>` executes one-shot detached prompt acceptance flow |
+| `serve [--host <h>] [--port <n>]` (`server` alias) | active | starts HTTP server + SQLite (`./opencode.db`) with bind precedence `CLI > resolved config > defaults` |
+| `prompt <text> [--output text|json] [--timeout-ms <n>]` | active | one-shot detached prompt acceptance flow with deterministic result payload |
 | `version` | active | prints `opencode <version>` |
 | `config --show` | active | prints merged runtime config JSON |
 | `config` | stub | edit flow not implemented |
 | `tool <name>` | active | runs built-in tool execution path |
+| `providers list [--output text|json]` | active | lists provider catalog from backend-aligned route contracts |
+| `session list` | active | resolves project from cwd and lists sessions deterministically |
+
+## Deterministic CLI semantics
+
+Core scriptable commands (`serve`, `providers list`, `session list`, non-interactive `run`, and `prompt`) follow a predictable contract:
+
+- stdout contains only command payloads intended for piping/parsing
+- stderr contains actionable diagnostics
+- `0` indicates success, `1` indicates runtime/backend failure, and `2` indicates CLI input validation failure
 
 ## Startup composition details
 

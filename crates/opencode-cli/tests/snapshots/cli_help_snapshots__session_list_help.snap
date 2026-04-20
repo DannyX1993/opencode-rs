@@ -1,0 +1,10 @@
+---
+source: crates/opencode-cli/tests/cli_help_snapshots.rs
+expression: "render_help(&[\"opencode\", \"session\", \"list\", \"--help\"])"
+---
+List sessions for the cwd-resolved project
+
+Usage: opencode session list
+
+Options:
+  -h, --help  Print help

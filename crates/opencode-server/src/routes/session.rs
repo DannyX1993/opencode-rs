@@ -12,75 +12,16 @@ use axum::{
     response::IntoResponse,
 };
 use opencode_core::{
-    dto::{MessageWithParts, PartRow, SessionRow},
-    id::{MessageId, ProjectId, SessionId, WorkspaceId},
+    dto::{
+        MessageWithParts, PartRow, SessionDetachedPromptDto, SessionHandleDto,
+        SessionPromptRequestDto, SessionRow,
+    },
+    id::{ProjectId, SessionId, WorkspaceId},
 };
-use opencode_session::types::{
-    DetachedPromptAccepted, SessionHandle, SessionPrompt, SessionRuntimeStatus,
-};
+use opencode_session::types::{SessionPrompt, SessionRuntimeStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::HttpError, state::AppState};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionDto {
-    id: SessionId,
-    project_id: ProjectId,
-    #[serde(default)]
-    workspace_id: Option<WorkspaceId>,
-    #[serde(default)]
-    parent_id: Option<SessionId>,
-    slug: String,
-    directory: String,
-    title: String,
-    version: String,
-    #[serde(default)]
-    share_url: Option<String>,
-    #[serde(default)]
-    summary_additions: Option<i64>,
-    #[serde(default)]
-    summary_deletions: Option<i64>,
-    #[serde(default)]
-    summary_files: Option<i64>,
-    #[serde(default)]
-    summary_diffs: Option<serde_json::Value>,
-    #[serde(default)]
-    revert: Option<serde_json::Value>,
-    #[serde(default)]
-    permission: Option<serde_json::Value>,
-    time_created: i64,
-    time_updated: i64,
-    #[serde(default)]
-    time_compacting: Option<i64>,
-    #[serde(default)]
-    time_archived: Option<i64>,
-}
-
-impl From<SessionRow> for SessionDto {
-    fn from(row: SessionRow) -> Self {
-        Self {
-            id: row.id,
-            project_id: row.project_id,
-            workspace_id: row.workspace_id,
-            parent_id: row.parent_id,
-            slug: row.slug,
-            directory: row.directory,
-            title: row.title,
-            version: row.version,
-            share_url: row.share_url,
-            summary_additions: row.summary_additions,
-            summary_deletions: row.summary_deletions,
-            summary_files: row.summary_files,
-            summary_diffs: row.summary_diffs,
-            revert: row.revert,
-            permission: row.permission,
-            time_created: row.time_created,
-            time_updated: row.time_updated,
-            time_compacting: row.time_compacting,
-            time_archived: row.time_archived,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SessionCreateDto {
@@ -249,59 +190,10 @@ impl SessionPatchDto {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct SessionPromptDto {
-    text: String,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    plan_mode: bool,
-    #[serde(default)]
-    detached: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SessionHandleDto {
-    session_id: SessionId,
-    #[serde(default)]
-    assistant_message_id: Option<MessageId>,
-    #[serde(default)]
-    resolved_model: Option<String>,
-}
-
-impl From<SessionHandle> for SessionHandleDto {
-    fn from(handle: SessionHandle) -> Self {
-        Self {
-            session_id: handle.session_id,
-            assistant_message_id: handle.assistant_message_id,
-            resolved_model: handle.resolved_model,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct SessionRuntimeStatusDto {
     session_id: SessionId,
     status: SessionRuntimeStatus,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SessionDetachedPromptDto {
-    session_id: SessionId,
-    #[serde(default)]
-    assistant_message_id: Option<MessageId>,
-    #[serde(default)]
-    resolved_model: Option<String>,
-}
-
-impl From<DetachedPromptAccepted> for SessionDetachedPromptDto {
-    fn from(accepted: DetachedPromptAccepted) -> Self {
-        Self {
-            session_id: accepted.session_id,
-            assistant_message_id: accepted.assistant_message_id,
-            resolved_model: accepted.resolved_model,
-        }
-    }
 }
 
 /// `POST /api/v1/projects/:pid/sessions` — create a new session.
@@ -323,10 +215,7 @@ pub(crate) async fn list(
     Path(pid): Path<ProjectId>,
 ) -> impl IntoResponse {
     match s.storage.list_sessions(pid).await {
-        Ok(rows) => {
-            let body = rows.into_iter().map(SessionDto::from).collect::<Vec<_>>();
-            (StatusCode::OK, Json(body)).into_response()
-        }
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
         Err(e) => HttpError::from(e).into_response(),
     }
 }
@@ -337,7 +226,7 @@ pub(crate) async fn get(
     Path(sid): Path<SessionId>,
 ) -> impl IntoResponse {
     match s.storage.get_session(sid).await {
-        Ok(Some(row)) => (StatusCode::OK, Json(SessionDto::from(row))).into_response(),
+        Ok(Some(row)) => (StatusCode::OK, Json(row)).into_response(),
         Ok(None) => HttpError::not_found(format!("session {sid} not found")).into_response(),
         Err(e) => HttpError::from(e).into_response(),
     }
@@ -404,7 +293,7 @@ pub(crate) async fn append_message(
 pub(crate) async fn prompt(
     State(s): State<AppState>,
     Path(sid): Path<SessionId>,
-    Json(payload): Json<SessionPromptDto>,
+    Json(payload): Json<SessionPromptRequestDto>,
 ) -> impl IntoResponse {
     if payload.detached {
         return match s
@@ -417,11 +306,14 @@ pub(crate) async fn prompt(
             })
             .await
         {
-            Ok(handle) => (
-                StatusCode::ACCEPTED,
-                Json(SessionDetachedPromptDto::from(handle)),
-            )
-                .into_response(),
+            Ok(handle) => {
+                let response = SessionDetachedPromptDto {
+                    session_id: handle.session_id,
+                    assistant_message_id: handle.assistant_message_id,
+                    resolved_model: handle.resolved_model,
+                };
+                (StatusCode::ACCEPTED, Json(response)).into_response()
+            }
             Err(err) => HttpError::from(err).into_response(),
         };
     }
@@ -436,7 +328,14 @@ pub(crate) async fn prompt(
         })
         .await
     {
-        Ok(handle) => (StatusCode::ACCEPTED, Json(SessionHandleDto::from(handle))).into_response(),
+        Ok(handle) => {
+            let response = SessionHandleDto {
+                session_id: handle.session_id,
+                assistant_message_id: handle.assistant_message_id,
+                resolved_model: handle.resolved_model,
+            };
+            (StatusCode::ACCEPTED, Json(response)).into_response()
+        }
         Err(err) => HttpError::from(err).into_response(),
     }
 }
@@ -1057,7 +956,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let row: SessionDto = serde_json::from_slice(&body).unwrap();
+        let row: SessionRow = serde_json::from_slice(&body).unwrap();
         assert_eq!(row.id, sid);
         assert_eq!(row.title, "Test Session");
     }
@@ -1371,7 +1270,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let rows: Vec<SessionDto> = serde_json::from_slice(&body).unwrap();
+        let rows: Vec<SessionRow> = serde_json::from_slice(&body).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, sid1);
         assert_eq!(rows[0].project_id, pid);

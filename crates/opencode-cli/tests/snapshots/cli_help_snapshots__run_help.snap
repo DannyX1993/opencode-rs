@@ -1,0 +1,15 @@
+---
+source: crates/opencode-cli/tests/cli_help_snapshots.rs
+expression: "render_help(&[\"opencode\", \"run\", \"--help\"])"
+---
+Start the interactive TUI (default) or run a one-shot prompt when text is provided
+
+Usage: opencode run [OPTIONS] [TEXT]...
+
+Arguments:
+  [TEXT]...  One-shot prompt text (non-interactive mode) as whitespace-joined tokens
+
+Options:
+      --output <OUTPUT>          Output format for non-interactive mode: text | json [default: text]
+      --timeout-ms <TIMEOUT_MS>  Timeout budget for backend request acceptance in milliseconds [default: 30000]
+  -h, --help                     Print help

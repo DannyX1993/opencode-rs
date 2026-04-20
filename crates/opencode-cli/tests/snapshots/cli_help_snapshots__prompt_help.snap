@@ -1,0 +1,15 @@
+---
+source: crates/opencode-cli/tests/cli_help_snapshots.rs
+expression: "render_help(&[\"opencode\", \"prompt\", \"--help\"])"
+---
+Run a single one-shot prompt and exit
+
+Usage: opencode prompt [OPTIONS] <TEXT>
+
+Arguments:
+  <TEXT>  The prompt text
+
+Options:
+      --output <OUTPUT>          Output format: text | json [default: text]
+      --timeout-ms <TIMEOUT_MS>  Timeout budget for backend request acceptance in milliseconds [default: 30000]
+  -h, --help                     Print help

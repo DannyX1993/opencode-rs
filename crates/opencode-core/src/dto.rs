@@ -154,6 +154,48 @@ pub struct SessionRow {
     pub time_archived: Option<i64>,
 }
 
+/// Request payload for `/api/v1/sessions/:sid/prompt`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPromptRequestDto {
+    /// Prompt text to execute.
+    pub text: String,
+    /// Optional model override.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Run in plan-only mode.
+    #[serde(default)]
+    pub plan_mode: bool,
+    /// Execute detached and return acceptance metadata immediately.
+    #[serde(default)]
+    pub detached: bool,
+}
+
+/// Detached prompt acceptance payload shared by server and CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDetachedPromptDto {
+    /// Session id that accepted the detached prompt.
+    pub session_id: SessionId,
+    /// Assistant message id reserved for this turn, when available.
+    #[serde(default)]
+    pub assistant_message_id: Option<MessageId>,
+    /// Resolved model chosen by runtime, when available.
+    #[serde(default)]
+    pub resolved_model: Option<String>,
+}
+
+/// Prompt submission handle payload for non-detached prompt requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionHandleDto {
+    /// Session id that accepted the prompt.
+    pub session_id: SessionId,
+    /// Assistant message id reserved for this turn, when available.
+    #[serde(default)]
+    pub assistant_message_id: Option<MessageId>,
+    /// Resolved model chosen by runtime, when available.
+    #[serde(default)]
+    pub resolved_model: Option<String>,
+}
+
 // ─── Message ─────────────────────────────────────────────────────────────────
 
 /// Row from the `message` table.
@@ -569,5 +611,49 @@ mod tests {
         let back: MessageWithParts = serde_json::from_value(json).unwrap();
         assert_eq!(back.info.id, mid);
         assert_eq!(back.parts[0].data["text"], "pong");
+    }
+
+    #[test]
+    fn session_prompt_request_dto_round_trips() {
+        let dto = SessionPromptRequestDto {
+            text: "hello".to_string(),
+            model: Some("gpt-4.1".to_string()),
+            plan_mode: true,
+            detached: true,
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        let back: SessionPromptRequestDto = serde_json::from_value(json).unwrap();
+        assert_eq!(dto.text, back.text);
+        assert_eq!(dto.model, back.model);
+        assert_eq!(dto.plan_mode, back.plan_mode);
+        assert_eq!(dto.detached, back.detached);
+    }
+
+    #[test]
+    fn session_detached_prompt_dto_round_trips() {
+        let dto = SessionDetachedPromptDto {
+            session_id: SessionId::new(),
+            assistant_message_id: Some(MessageId::new()),
+            resolved_model: Some("claude-sonnet".to_string()),
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        let back: SessionDetachedPromptDto = serde_json::from_value(json).unwrap();
+        assert_eq!(dto.session_id, back.session_id);
+        assert_eq!(dto.assistant_message_id, back.assistant_message_id);
+        assert_eq!(dto.resolved_model, back.resolved_model);
+    }
+
+    #[test]
+    fn session_handle_dto_round_trips() {
+        let dto = SessionHandleDto {
+            session_id: SessionId::new(),
+            assistant_message_id: None,
+            resolved_model: Some("gpt-4.1-mini".to_string()),
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        let back: SessionHandleDto = serde_json::from_value(json).unwrap();
+        assert_eq!(dto.session_id, back.session_id);
+        assert_eq!(dto.assistant_message_id, back.assistant_message_id);
+        assert_eq!(dto.resolved_model, back.resolved_model);
     }
 }

@@ -3,55 +3,190 @@
 //! `main.rs` is a thin shim; all command dispatch lives here so tests can
 //! exercise every branch without spawning a full process.
 
-use anyhow::Result;
-use opencode_cli::cli::{Cli, Command};
+use anyhow::{Result, anyhow};
+use opencode_cli::cli::{Cli, Command, ProvidersCommand, SessionCommand};
 use opencode_core::config_service::{ConfigService, ServerBindOverrides};
 use opencode_server::control_plane::proxy::HttpProxyService;
 use opencode_server::state::{ControlPlaneConfig, ProxyPolicy};
 use std::{path::Path, time::Duration};
 
-/// Dispatch the parsed CLI command, given the already-bootstrapped config.
+/// Command execution result for scriptable command handling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutcome {
+    /// User-facing payload emitted on standard output.
+    pub stdout: String,
+    /// User/actionable diagnostics emitted on standard error.
+    pub stderr: String,
+    /// Process-compatible command exit status.
+    pub exit_code: i32,
+}
+
+impl CommandOutcome {
+    /// Build a successful command outcome with `exit_code == 0`.
+    #[must_use]
+    pub fn success(stdout: impl Into<String>) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_code: 0,
+        }
+    }
+
+    /// Build a failed command outcome with a non-zero exit code.
+    #[must_use]
+    pub fn failure(stderr: impl Into<String>, exit_code: i32) -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: stderr.into(),
+            exit_code,
+        }
+    }
+}
+
+/// Execute the parsed CLI command and return a deterministic command outcome.
 ///
-/// Returns `Ok(())` on successful dispatch (even for stubs not yet implemented).
-///
-/// # Errors
-///
-/// Returns an error if config loading fails for the `Config` sub-command, or
-/// if any other operation propagates an `anyhow::Error`.
-pub async fn dispatch(cli: Cli, cwd: &Path) -> Result<()> {
-    match cli.command.unwrap_or(Command::Run) {
+/// Core scriptable commands intentionally preserve backend-aligned semantics:
+/// stdout carries command payloads, stderr carries actionable diagnostics, and
+/// exit code mapping stays stable for shell automation.
+pub async fn run_command(cli: Cli, cwd: &Path) -> CommandOutcome {
+    match cli.command.unwrap_or(Command::Run {
+        text: Vec::new(),
+        output: "text".to_string(),
+        timeout_ms: 30_000,
+    }) {
         Command::Version => {
-            println!("opencode {}", env!("CARGO_PKG_VERSION"));
+            CommandOutcome::success(format!("opencode {}\n", env!("CARGO_PKG_VERSION")))
         }
-        Command::Run => {
-            tracing::info!("TUI mode — not yet implemented");
+        Command::Run {
+            text,
+            output,
+            timeout_ms,
+        } => {
+            if text.is_empty() {
+                tracing::info!("TUI mode — not yet implemented");
+                return CommandOutcome::success(String::new());
+            }
+
+            let backend = match opencode_cli::bootstrap::bootstrap_backend_client(cwd).await {
+                Ok(client) => client,
+                Err(error) => return CommandOutcome::failure(format!("error: {error}\n"), 1),
+            };
+
+            let joined = text.join(" ");
+            let outcome = opencode_cli::commands::run::run(
+                &backend,
+                cwd,
+                joined.as_str(),
+                output.as_str(),
+                Duration::from_millis(timeout_ms),
+            )
+            .await;
+            CommandOutcome {
+                stdout: outcome.stdout,
+                stderr: outcome.stderr,
+                exit_code: outcome.exit_code,
+            }
         }
-        Command::Server { host, port } => {
-            start_server(cwd, ServerBindOverrides { host, port }).await?;
+        Command::Serve { host, port } => {
+            let outcome = opencode_cli::commands::serve::run(cwd, host, port).await;
+            CommandOutcome {
+                stdout: outcome.stdout,
+                stderr: outcome.stderr,
+                exit_code: outcome.exit_code,
+            }
         }
-        Command::Prompt { text, .. } => {
-            tracing::info!(%text, "one-shot prompt — not yet implemented");
+        // Keep `prompt` and non-interactive `run <text...>` on the same code
+        // path so timeout/output/acceptance behavior cannot drift.
+        Command::Prompt {
+            text,
+            output,
+            timeout_ms,
+        } => {
+            let backend = match opencode_cli::bootstrap::bootstrap_backend_client(cwd).await {
+                Ok(client) => client,
+                Err(error) => return CommandOutcome::failure(format!("error: {error}\n"), 1),
+            };
+            let outcome = opencode_cli::commands::run::run(
+                &backend,
+                cwd,
+                text.as_str(),
+                output.as_str(),
+                Duration::from_millis(timeout_ms),
+            )
+            .await;
+            CommandOutcome {
+                stdout: outcome.stdout,
+                stderr: outcome.stderr,
+                exit_code: outcome.exit_code,
+            }
         }
         Command::Config { show: true } => {
-            let cfg = ConfigService::new(cwd.to_path_buf()).resolve().await?;
-            println!("{}", serde_json::to_string_pretty(&cfg)?);
+            let result = async {
+                let cfg = ConfigService::new(cwd.to_path_buf()).resolve().await?;
+                anyhow::Ok(format!("{}\n", serde_json::to_string_pretty(&cfg)?))
+            }
+            .await;
+            match result {
+                Ok(stdout) => CommandOutcome::success(stdout),
+                Err(error) => CommandOutcome::failure(format!("error: {error}\n"), 1),
+            }
         }
         Command::Config { show: false } => {
             tracing::info!("config edit — not yet implemented");
+            CommandOutcome::success(String::new())
         }
         Command::Tool {
             name,
             args_json,
             output,
         } => match opencode_cli::tool_cmd::run(&name, args_json.as_deref(), &output, cwd).await {
-            Ok(out) => print!("{out}"),
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+            Ok(stdout) => CommandOutcome::success(stdout),
+            Err(error) => CommandOutcome::failure(format!("error: {error}\n"), 1),
+        },
+        Command::Providers { command } => match command {
+            ProvidersCommand::List { output } => {
+                let backend = match opencode_cli::bootstrap::bootstrap_backend_client(cwd).await {
+                    Ok(client) => client,
+                    Err(error) => return CommandOutcome::failure(format!("error: {error}\n"), 1),
+                };
+                let outcome =
+                    opencode_cli::commands::providers_list::run(&backend, output.as_str()).await;
+                CommandOutcome {
+                    stdout: outcome.stdout,
+                    stderr: outcome.stderr,
+                    exit_code: outcome.exit_code,
+                }
+            }
+        },
+        Command::Session { command } => match command {
+            SessionCommand::List => {
+                let backend = match opencode_cli::bootstrap::bootstrap_backend_client(cwd).await {
+                    Ok(client) => client,
+                    Err(error) => return CommandOutcome::failure(format!("error: {error}\n"), 1),
+                };
+                let outcome = opencode_cli::commands::session_list::run(&backend, cwd).await;
+                CommandOutcome {
+                    stdout: outcome.stdout,
+                    stderr: outcome.stderr,
+                    exit_code: outcome.exit_code,
+                }
             }
         },
     }
-    Ok(())
+}
+
+/// Backwards-compatible dispatch API for tests using `anyhow::Result`.
+///
+/// # Errors
+///
+/// Returns an error when the command outcome exit code is non-zero.
+pub async fn dispatch(cli: Cli, cwd: &Path) -> Result<()> {
+    let outcome = run_command(cli, cwd).await;
+    if outcome.exit_code == 0 {
+        return Ok(());
+    }
+
+    Err(anyhow!(outcome.stderr.trim().to_string()))
 }
 
 /// Start the HTTP server using resolved bind settings for `cwd`.
@@ -272,9 +407,14 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_prompt() {
-        dispatch_from(&["opencode", "prompt", "hello"])
+        let error = dispatch_from(&["opencode", "prompt", "hello"])
             .await
-            .unwrap();
+            .expect_err("prompt without cwd project should fail deterministically");
+        assert!(
+            error
+                .to_string()
+                .contains("could not resolve project for cwd")
+        );
     }
 
     #[tokio::test]
@@ -296,7 +436,7 @@ mod tests {
 
     #[test]
     fn package_version_matches_next_minor_release() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.13.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.14.0");
     }
 
     // RED S.1 — `server` subcommand binds a real TCP socket and serves health

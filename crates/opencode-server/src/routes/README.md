@@ -35,6 +35,18 @@ HTTP route modules for the Rust server surface.
 
 These guarantees are consumed by control-plane middleware when resolving local-vs-forward routing.
 
+## CLI/backend parity contracts
+
+`opencode-cli` core command slices in `v0.14.0` intentionally consume these route contracts for deterministic behavior:
+
+- `providers list` → `GET /api/v1/provider`
+- `session list` and one-shot `run`/`prompt` project resolution → `GET /api/v1/projects`
+- `session list` and one-shot `run`/`prompt` session lookup → `GET /api/v1/projects/:project_id/sessions`
+- one-shot `run`/`prompt` session creation (when missing) → `POST /api/v1/projects/:project_id/sessions`
+- one-shot `run`/`prompt` detached acceptance → `POST /api/v1/sessions/:session_id/prompt` (`detached=true`)
+
+This route-level reuse keeps command semantics backend-aligned instead of introducing separate CLI-only behavior.
+
 ## Boundaries
 
 - Routes should stay adapter-thin.

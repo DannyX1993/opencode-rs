@@ -281,6 +281,7 @@ fn dirs_home() -> Option<PathBuf> {
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
+    use crate::test_env;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -292,6 +293,8 @@ mod tests {
 
     #[tokio::test]
     async fn defaults_load_ok() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let cfg = Config::load(dir.path()).await.unwrap();
         assert_eq!(cfg.log_level, "info");
@@ -300,6 +303,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_overrides_default() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let oc = dir.path().join(".opencode");
         std::fs::create_dir_all(&oc).unwrap();
@@ -315,6 +320,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_server_host_and_port_override_defaults() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let oc = dir.path().join(".opencode");
         std::fs::create_dir_all(&oc).unwrap();
@@ -331,6 +338,8 @@ mod tests {
 
     #[tokio::test]
     async fn env_var_overrides() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         // SAFETY: test-only; single-threaded tokio test runner.
         unsafe { std::env::set_var("OPENCODE_MODEL", "anthropic/claude-opus-4-5") };
         let dir = TempDir::new().unwrap();
@@ -341,6 +350,8 @@ mod tests {
 
     #[tokio::test]
     async fn jsonc_comments_are_stripped() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let oc = dir.path().join(".opencode");
         std::fs::create_dir_all(&oc).unwrap();
@@ -351,6 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn provider_keys_merge() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let oc = dir.path().join(".opencode");
         std::fs::create_dir_all(&oc).unwrap();
@@ -367,6 +380,8 @@ mod tests {
 
     #[tokio::test]
     async fn provider_filters_merge_from_local_config() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let oc = dir.path().join(".opencode");
         std::fs::create_dir_all(&oc).unwrap();
@@ -385,6 +400,8 @@ mod tests {
 
     #[tokio::test]
     async fn provider_env_vars_override() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         unsafe {
             std::env::set_var("ANTHROPIC_API_KEY", "ant-env");
             std::env::set_var("OPENAI_API_KEY", "oai-env");
@@ -404,6 +421,8 @@ mod tests {
 
     #[tokio::test]
     async fn server_port_env_var() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         unsafe { std::env::set_var("OPENCODE_SERVER_PORT", "9999") };
         let dir = TempDir::new().unwrap();
         let cfg = Config::load(dir.path()).await.unwrap();
@@ -413,6 +432,8 @@ mod tests {
 
     #[tokio::test]
     async fn auth_token_env_var() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         unsafe { std::env::set_var("OPENCODE_AUTH_TOKEN", "mysecret") };
         let dir = TempDir::new().unwrap();
         let cfg = Config::load(dir.path()).await.unwrap();
@@ -422,6 +443,8 @@ mod tests {
 
     #[tokio::test]
     async fn server_host_env_var() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         unsafe { std::env::set_var("OPENCODE_SERVER_HOST", "127.0.0.2") };
         let dir = TempDir::new().unwrap();
         let cfg = Config::load(dir.path()).await.unwrap();
@@ -431,6 +454,8 @@ mod tests {
 
     #[tokio::test]
     async fn log_level_env_var() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         unsafe { std::env::set_var("OPENCODE_LOG_LEVEL", "warn") };
         let dir = TempDir::new().unwrap();
         let cfg = Config::load(dir.path()).await.unwrap();
@@ -440,6 +465,8 @@ mod tests {
 
     #[tokio::test]
     async fn cwd_field_merges() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let oc = dir.path().join(".opencode");
         std::fs::create_dir_all(&oc).unwrap();
@@ -450,6 +477,8 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_jsonc_returns_error() {
+        let _env = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let oc = dir.path().join(".opencode");
         std::fs::create_dir_all(&oc).unwrap();

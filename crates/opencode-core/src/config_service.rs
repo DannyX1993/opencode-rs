@@ -165,15 +165,9 @@ async fn write_config_file(path: &Path, cfg: &Config) -> Result<(), ConfigError>
 mod tests {
     use super::{ConfigScope, ConfigService, ServerBindOverrides};
     use crate::config::Config;
+    use crate::test_env;
     use std::io::Write;
-    use std::sync::OnceLock;
     use tempfile::TempDir;
-    use tokio::sync::Mutex;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn write_jsonc(path: &std::path::Path, content: &str) {
         let mut file = std::fs::File::create(path).unwrap();
@@ -182,7 +176,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_uses_global_then_local_then_env_precedence() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         let project = tmp.path().join("project");
@@ -215,7 +210,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_scope_invalidates_cache_on_success() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let service = ConfigService::with_global_config_path(
             dir.path().to_path_buf(),
@@ -247,7 +243,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_update_keeps_previous_cached_config() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let project = dir.path().join("project");
         let global = dir.path().join("home/.config/opencode/config.jsonc");
@@ -290,7 +287,8 @@ mod tests {
 
     #[tokio::test]
     async fn read_scope_returns_defaults_when_scope_file_missing() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let service = ConfigService::with_global_config_path(
             dir.path().to_path_buf(),
@@ -308,7 +306,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_bind_applies_cli_overrides_only_for_host_and_port() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let service = ConfigService::with_global_config_path(
             dir.path().to_path_buf(),
@@ -340,7 +339,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_bind_keeps_resolved_host_when_cli_host_not_provided() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let service = ConfigService::with_global_config_path(
             dir.path().to_path_buf(),
@@ -369,7 +369,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_uses_defaults_when_files_and_env_are_absent() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         let dir = TempDir::new().unwrap();
         let service = ConfigService::with_global_config_path(dir.path().to_path_buf(), None);
 
@@ -381,7 +382,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_applies_env_override_for_auth_token_after_file_merges() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         let project = tmp.path().join("project");
@@ -412,7 +414,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_bind_keeps_resolved_port_when_cli_port_not_provided() {
-        let _guard = env_lock().lock().await;
+        let _guard = test_env::lock().await;
+        test_env::clear();
         unsafe {
             std::env::remove_var("OPENCODE_SERVER_PORT");
             std::env::remove_var("OPENCODE_SERVER_HOST");

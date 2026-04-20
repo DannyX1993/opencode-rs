@@ -23,6 +23,8 @@ These contracts are intentionally separate from session runtime naming. `RunSnap
 
 `src/dto.rs` exports persistence/transport-neutral rows used across storage and server layers, including `ProjectFoundationRow` for additive repository/worktree state.
 
+The `v0.14.0` CLI/backend alignment also depends on these DTOs for route-level command contracts (project/session listing and detached prompt acceptance), keeping CLI adapters and server handlers on one shared shape.
+
 Design constraints enforced here:
 
 - unknown fields are representable (`Option<_>`)

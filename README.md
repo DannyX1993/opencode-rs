@@ -6,9 +6,26 @@ Rust workspace for the `opencode` runtime, HTTP server, domain crates, and SQLit
 
 ## Release
 
-- Current workspace release: **`0.13.0`**
-- Tag convention for published git releases in this repo: **`<semver>`** (for this cycle: `0.13.0`)
+- Current workspace release: **`0.14.0`**
+- Tag convention for published git releases in this repo: **`<semver>`** (for this cycle: `0.14.0`)
 - Crates use `version.workspace = true`, so all Rust packages stay lockstep with `[workspace.package]`.
+
+## CLI/backend alignment follow-up (v0.14.0)
+
+The `port-cli-core-commands` stream adds backend-aligned, scriptable CLI slices for:
+
+- `serve` (with `server` kept as a visible alias)
+- `providers list`
+- `session list`
+- non-interactive `run <text...>`
+- non-interactive `prompt <text>`
+
+Deterministic command semantics are part of the contract:
+
+- stdout is reserved for stable machine/user payloads
+- stderr carries actionable diagnostics
+- exit codes are explicit (`0` success, `1` runtime/backend failure, `2` CLI usage/validation failure)
+- non-interactive prompt flows are acceptance-based (detached request accepted by backend), with `--timeout-ms` budget controls
 
 ## What landed in this change stream
 
@@ -21,7 +38,7 @@ Rust workspace for the `opencode` runtime, HTTP server, domain crates, and SQLit
 3. Preserve operational safety with explicit rollback and bounded forwarding policy.
 4. Keep WebSocket parity explicit: forwarding is intentionally deferred in this release.
 
-### Control-plane behavior (v0.13.0)
+### Control-plane behavior (v0.13.0 baseline)
 
 - New selector resolution precedence for eligible routes:
   - `?workspace=<id>` query first
@@ -118,6 +135,7 @@ See [`crates/README.md`](crates/README.md) for crate index and statuses.
 ## Additional docs
 
 - [`crates/opencode-core/README.md`](crates/opencode-core/README.md)
+- [`crates/opencode-cli/README.md`](crates/opencode-cli/README.md)
 - [`crates/opencode-storage/README.md`](crates/opencode-storage/README.md)
 - [`crates/opencode-server/README.md`](crates/opencode-server/README.md)
 - [`crates/opencode-server/src/control_plane/README.md`](crates/opencode-server/src/control_plane/README.md)

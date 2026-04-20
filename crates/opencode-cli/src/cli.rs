@@ -27,12 +27,22 @@ pub struct Cli {
 /// Available opencode subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Start the interactive TUI (default).
-    Run,
+    /// Start the interactive TUI (default) or run a one-shot prompt when text is provided.
+    Run {
+        /// One-shot prompt text (non-interactive mode) as whitespace-joined tokens.
+        text: Vec<String>,
+        /// Output format for non-interactive mode: text | json.
+        #[arg(long, default_value = "text")]
+        output: String,
+        /// Timeout budget for backend request acceptance in milliseconds.
+        #[arg(long, default_value_t = 30_000)]
+        timeout_ms: u64,
+    },
 
     /// Start the HTTP API server in headless mode.
     /// Bind precedence: CLI > resolved config > defaults.
-    Server {
+    #[command(visible_alias = "server")]
+    Serve {
         /// Bind host override (CLI > resolved config > defaults).
         #[arg(long)]
         host: Option<String>,
@@ -48,6 +58,9 @@ pub enum Command {
         /// Output format: text | json.
         #[arg(long, default_value = "text")]
         output: String,
+        /// Timeout budget for backend request acceptance in milliseconds.
+        #[arg(long, default_value_t = 30_000)]
+        timeout_ms: u64,
     },
 
     /// Print version information.
@@ -77,6 +90,38 @@ pub enum Command {
         #[arg(long, default_value = "text")]
         output: String,
     },
+
+    /// Inspect configured and available providers.
+    Providers {
+        /// Providers subcommand.
+        #[command(subcommand)]
+        command: ProvidersCommand,
+    },
+
+    /// Inspect project sessions for the current working directory.
+    Session {
+        /// Session subcommand.
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+
+/// Provider inspection subcommands.
+#[derive(Subcommand, Debug)]
+pub enum ProvidersCommand {
+    /// List providers in table or JSON mode.
+    List {
+        /// Output format: text | json.
+        #[arg(long, default_value = "text")]
+        output: String,
+    },
+}
+
+/// Session inspection subcommands.
+#[derive(Subcommand, Debug)]
+pub enum SessionCommand {
+    /// List sessions for the cwd-resolved project.
+    List,
 }
 
 impl Cli {
@@ -103,7 +148,32 @@ mod tests {
     #[test]
     fn run_subcommand() {
         let cli = Cli::try_parse_from(["opencode", "run"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Run)));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                text,
+                output,
+                timeout_ms
+            }) if text.is_empty() && output == "text" && timeout_ms == 30_000
+        ));
+    }
+
+    #[test]
+    fn run_subcommand_accepts_message_and_output_flags_for_noninteractive_mode() {
+        let cli = Cli::try_parse_from([
+            "opencode",
+            "run",
+            "explain",
+            "rust",
+            "lifetimes",
+            "--output",
+            "json",
+            "--timeout-ms",
+            "1500",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.command, Some(Command::Run { .. })));
     }
 
     #[test]
@@ -111,7 +181,7 @@ mod tests {
         let cli = Cli::try_parse_from(["opencode", "server"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Server {
+            Some(Command::Serve {
                 host: None,
                 port: None
             })
@@ -123,7 +193,7 @@ mod tests {
         let cli = Cli::try_parse_from(["opencode", "server", "--port", "8080"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Server {
+            Some(Command::Serve {
                 host: None,
                 port: Some(8080)
             })
@@ -135,9 +205,23 @@ mod tests {
         let cli = Cli::try_parse_from(["opencode", "server", "--host", "127.0.0.9"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Server {
+            Some(Command::Serve {
                 host: Some(ref host),
                 port: None
+            }) if host == "127.0.0.9"
+        ));
+    }
+
+    #[test]
+    fn serve_subcommand_parses_bind_flags() {
+        let cli =
+            Cli::try_parse_from(["opencode", "serve", "--host", "127.0.0.9", "--port", "8088"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Serve {
+                host: Some(ref host),
+                port: Some(8088)
             }) if host == "127.0.0.9"
         ));
     }
@@ -155,9 +239,32 @@ mod tests {
     #[test]
     fn prompt_subcommand() {
         let cli = Cli::try_parse_from(["opencode", "prompt", "hello world"]).unwrap();
-        if let Some(Command::Prompt { text, output }) = cli.command {
+        if let Some(Command::Prompt {
+            text,
+            output,
+            timeout_ms,
+        }) = cli.command
+        {
             assert_eq!(text, "hello world");
             assert_eq!(output, "text");
+            assert_eq!(timeout_ms, 30_000);
+        } else {
+            panic!("expected Prompt subcommand");
+        }
+    }
+
+    #[test]
+    fn prompt_subcommand_supports_timeout_for_deterministic_noninteractive_execution() {
+        let cli =
+            Cli::try_parse_from(["opencode", "prompt", "hello world", "--timeout-ms", "2500"])
+                .unwrap();
+
+        if let Some(Command::Prompt {
+            output, timeout_ms, ..
+        }) = cli.command
+        {
+            assert_eq!(output, "text");
+            assert_eq!(timeout_ms, 2500);
         } else {
             panic!("expected Prompt subcommand");
         }
@@ -240,5 +347,39 @@ mod tests {
     fn tool_subcommand_missing_name_errors() {
         let result = Cli::try_parse_from(["opencode", "tool"]);
         assert!(result.is_err(), "tool subcommand requires a name argument");
+    }
+
+    #[test]
+    fn providers_list_subcommand_default_output_text() {
+        let cli = Cli::try_parse_from(["opencode", "providers", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Providers {
+                command: ProvidersCommand::List { ref output }
+            }) if output == "text"
+        ));
+    }
+
+    #[test]
+    fn providers_list_subcommand_json_output() {
+        let cli =
+            Cli::try_parse_from(["opencode", "providers", "list", "--output", "json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Providers {
+                command: ProvidersCommand::List { ref output }
+            }) if output == "json"
+        ));
+    }
+
+    #[test]
+    fn session_list_subcommand_parses() {
+        let cli = Cli::try_parse_from(["opencode", "session", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Session {
+                command: SessionCommand::List
+            })
+        ));
     }
 }

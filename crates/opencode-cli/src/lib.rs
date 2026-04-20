@@ -5,6 +5,8 @@
 
 #![warn(missing_docs)]
 
+pub mod backend_client;
 pub mod bootstrap;
 pub mod cli;
+pub mod commands;
 pub mod tool_cmd;

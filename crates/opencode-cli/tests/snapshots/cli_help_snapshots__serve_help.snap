@@ -1,0 +1,12 @@
+---
+source: crates/opencode-cli/tests/cli_help_snapshots.rs
+expression: "render_help(&[\"opencode\", \"serve\", \"--help\"])"
+---
+Start the HTTP API server in headless mode. Bind precedence: CLI > resolved config > defaults
+
+Usage: opencode serve [OPTIONS]
+
+Options:
+      --host <HOST>  Bind host override (CLI > resolved config > defaults)
+  -p, --port <PORT>  Bind port override (CLI > resolved config > defaults)
+  -h, --help         Print help

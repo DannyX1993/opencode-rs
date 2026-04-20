@@ -32,6 +32,8 @@ See [`src/routes/README.md`](src/routes/README.md) for module-level route respon
 
 See [`src/control_plane/README.md`](src/control_plane/README.md) for middleware/proxy internals.
 
+In `v0.14.0`, `opencode-cli` core commands (`providers list`, `session list`, non-interactive `run`/`prompt`) are expected to consume these server route contracts directly for backend alignment.
+
 ## Boundaries
 
 - This crate owns HTTP boundary concerns (routing, middleware, extractor validation, proxying).

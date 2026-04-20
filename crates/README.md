@@ -11,7 +11,7 @@ This directory contains reusable Rust crates only. The runnable binary lives in 
 | Crate | Status | Purpose |
 | --- | --- | --- |
 | [`opencode-bus`](opencode-bus) | partial | Typed broadcast bus and shared event enums, including permission/question runtime events and session failures |
-| [`opencode-cli`](opencode-cli) | active | Clap CLI types, bootstrap flow, `tool` command dispatch |
+| [`opencode-cli`](opencode-cli) | active | Clap CLI types, bootstrap flow, backend-aligned command handlers (`serve`, `providers list`, `session list`, `run`, `prompt`) |
 | [`opencode-core`](opencode-core) | active | Shared DTOs, config, IDs, errors, tracing |
 | [`opencode-lsp`](opencode-lsp) | stub | Placeholder for future LSP integration |
 | [`opencode-mcp`](opencode-mcp) | stub | Placeholder for future MCP integration |
@@ -34,13 +34,14 @@ Current notable `partial` crate details:
 - `opencode-session` now includes bounded Anthropic/Google tool-loop execution, detached prompt acceptance, permission/question ask-reply runtimes, and blocked runtime status snapshots.
 - `opencode-bus` now includes `SessionError` plus permission/question ask/reply/reject events used by the SSE surface.
 
-Current notable `active` crate updates in `v0.13.0`:
+Current notable `active` crate updates in `v0.14.0`:
 
 - `opencode-provider` now owns provider metadata catalog filtering, auth-method discovery, and account-domain composition.
 - `opencode-server` now exposes public provider/account/config contracts (`/api/v1/provider*`, `/api/v1/config/providers`) alongside the manual stream harness.
 - `opencode-server` also exposes `GET /api/v1/event` plus singular `/api/v1/session/*` aliases for status, abort, message reads, and detached prompt parity.
 - `opencode-server` also exposes `/api/v1/permission*` and `/api/v1/question*` routes for interactive runtime gating.
 - `opencode-server` now adds workspace control-plane middleware (selector resolution, route policy, local/forward proxying, websocket deferral).
+- `opencode-cli` now routes core scriptable flows through backend contracts with deterministic stdout/stderr/exit semantics (`serve`, `providers list`, `session list`, `run`, `prompt`).
 - `opencode-storage` now exposes richer account/account_state helpers used by provider/account services.
 - `opencode-storage` now includes workspace repository CRUD used by control-plane target resolution.
 

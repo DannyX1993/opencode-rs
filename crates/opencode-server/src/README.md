@@ -17,3 +17,4 @@ Internal module layout for the Axum server crate.
 - Permission/question routes expose runtime pending queues and `ok: bool` reply contracts without introducing additional persistence tables.
 - Control-plane middleware runs in front of `/api/v1` and only forwards routes marked eligible by policy.
 - Forwarding strips hop-by-hop headers and injects explicit `x-opencode-forwarded-*` context headers for traceability.
+- Core CLI command handlers in `v0.14.0` rely on route contracts here for deterministic backend-aligned behavior (`providers list`, `session list`, detached one-shot prompt acceptance).

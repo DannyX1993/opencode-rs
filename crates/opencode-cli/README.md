@@ -12,18 +12,31 @@ Active. This crate is used by the current binary and has real tests around comma
 
 - clap argument parsing
 - bootstrap of config and tracing
+- backend client seam over in-process Axum routes for CLI/backend contract parity
 - the `tool` subcommand adapter into `opencode-tool`
 
 ## Commands Defined Here
 
 | Command | Implemented in runtime? | Notes |
 | --- | --- | --- |
-| `run` | no | default command, still stubbed in `opencode` |
-| `server [--host H] [--port N]` | yes | starts HTTP server; bind precedence is `CLI > resolved config > defaults` |
-| `prompt <text>` | no | parsed here, still stubbed in runtime |
+| `run [<text...>] [--output text\|json] [--timeout-ms N]` | partial | empty text keeps default TUI stub; text triggers backend-aligned detached prompt acceptance flow |
+| `serve [--host H] [--port N]` (`server` alias) | yes | starts HTTP server; bind precedence is `CLI > resolved config > defaults` |
+| `prompt <text> [--output text\|json] [--timeout-ms N]` | yes | backend-aligned detached prompt acceptance flow |
 | `version` | yes | printed by `opencode` |
 | `config [--show]` | partial | `--show` works; edit mode is stubbed |
 | `tool <name>` | yes | invokes built-in tool registry directly |
+| `providers list [--output text\|json]` | yes | reads provider catalog from backend routes with stable table/JSON output |
+| `session list` | yes | resolves project from cwd and prints deterministically sorted sessions |
+
+## Backend-aligned command contracts
+
+Core command handlers intentionally execute against backend HTTP contracts (through a local in-process router adapter) instead of bypassing domain routes directly. This keeps CLI behavior aligned with server route semantics and validation.
+
+Deterministic scriptability rules for these handlers:
+
+- stdout emits the stable payload only
+- stderr emits actionable diagnostics only
+- exit code mapping is explicit (`0` success, `1` backend/runtime failure, `2` CLI validation failure)
 
 ## Tool Command
 
